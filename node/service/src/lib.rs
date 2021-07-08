@@ -610,8 +610,9 @@ pub fn new_full<RuntimeApi, Executor, OverseerGenerator>(
 	};
 
 	let warp_sync = Arc::new(grandpa::warp_proof::NetworkProvider::new(
-			backend.clone(),
-			import_setup.1.shared_authority_set().clone(),
+		backend.clone(),
+		import_setup.1.shared_authority_set().clone(),
+		config.chain_spec.is_kusama().then(grandpa_support::kusama_hard_forks).unwrap_or_default(),
 	));
 
 	let (network, system_rpc_tx, network_starter) =
@@ -1044,8 +1045,9 @@ fn new_light<Runtime, Dispatch>(mut config: Configuration) -> Result<(
 	)?;
 
 	let warp_sync = Arc::new(grandpa::warp_proof::NetworkProvider::new(
-			backend.clone(),
-			grandpa_link.shared_authority_set().clone(),
+		backend.clone(),
+		grandpa_link.shared_authority_set().clone(),
+		config.chain_spec.is_kusama().then(grandpa_support::kusama_hard_forks).unwrap_or_default(),
 	));
 
 	let (network, system_rpc_tx, network_starter) =
