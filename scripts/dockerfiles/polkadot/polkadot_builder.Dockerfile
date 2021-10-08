@@ -14,6 +14,8 @@ LABEL io.parity.image.description="Polkadot: a platform for web3. This is a self
 
 COPY --from=builder /polkadot/target/release/polkadot /usr/local/bin
 
+RUN apt-get update && apt-get install -y --no-install-recommends libssl1.1 ca-certificates
+
 RUN useradd -m -u 1000 -U -s /bin/sh -d /polkadot polkadot && \
 	mkdir -p /polkadot/.local/share && \
 	mkdir /data && \
