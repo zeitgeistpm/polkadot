@@ -767,8 +767,8 @@ fn rococo_staging_testnet_config_genesis(wasm_binary: &[u8]) -> rococo_runtime::
 
 	// subkey inspect "$SECRET"
 	let endowed_accounts = vec![
-		// 5CP4dLQfkqqnD1tJMK3FBZBaW7MhDSEaCW8bVzFL9sCFFiWk
-		hex!["0e0055f1b12ab57d903cf9e94e0cb04023014f79b1780f69c0c4b9c6b4fd674d"].into(),
+		// 5HbWaKB8FS5t9V9Zt1918eRqspK6DMDEzmX3BrxwZpT2QX7f
+		hex!["f4abcbd9565cb6cf10893b5577bc107e7554e58d19d8228db4c7b9865155421f"].into(),
 	];
 
 	// ./scripts/prepare-test-net.sh 2
@@ -783,46 +783,46 @@ fn rococo_staging_testnet_config_genesis(wasm_binary: &[u8]) -> rococo_runtime::
 		AuthorityDiscoveryId,
 		BeefyId,
 	)> = vec![
-		(
-			//5GQXh94MEhV3xVekUXzq1gLHbpRL7ZiEGMZSzbXB6g1SKpEy
-			hex!["c00fa036eba7b470e08a83ab5c0e2921e9a29da264fd4b690ae0b131f045ed3e"].into(),
-			//5ES1WU5uHGXthUa6XoDCpjAUdxEZADwdQnR29Xz6CXdPxYnx
-			hex!["68b80a95651397c8be1e90169680cbb8651ee84473a1686ae8673b3f88c27b4f"].into(),
-			//5DtLtnDcEZeCTwHC5xg9h2E6kjtb6xEosi3FSzQbiiriMzqA
-			hex!["509171706b8128f1b7a1bfc6c227d866e75ea5d0772e74e231977f684a6a6831"].unchecked_into(),
-			//5FV1wmtcYhgpbCBJYQdsou2DKMCY6XRT4TkGxjhyw1vgFf2F
-			hex!["973f7ad54b367bc0ecfc9e93c9d751295aceecdbb136f3a033f7bb568a5a9b5c"].unchecked_into(),
-			//5CkMPtXir4SruTZdDRUKBhAf6NTuV1Az1jQqMdL9yk1yPZtd
-			hex!["1e3cef972bb72a6a2d84178c171319a16c369361a40d456e229689bd65152044"].unchecked_into(),
-			//5DPEhcPzhibk8xBp8gZJNMabPLdGPAz5mWvWFToEatMUNhD3
-			hex!["3a5e7af6f68e28b3ffc3130f14ae47b8ec0bdcb13453d561af0849f8a018607d"].unchecked_into(),
-			//5HpJnWa1R1mWswTSZrqnD6gEvbz8Pm8EMjxCrjrkSUMFkeHr
-			hex!["fe6e4c7f67a1804146b17b5a8e3d2a45563c13dfb85cdc3b41783c613d67fa04"].unchecked_into(),
-			//5DXGK4n2HmgysS3XKpGZhz95KwKGMGUJKERwF9Qvs7zh1ynP
-			hex!["407dde1e6aad6b83fbe017929777ccb250f614290c0dcbe0dc872a26259f0548"].unchecked_into(),
-			//5HHg1PGXKsHZ5XoHgMduF2qjw2eZrmfJnZCJ6kLc6e6PfpeQ
-			hex!["02878a9393911f073195142389bf0386f18bf7edbaa101150da680599516768b4b"].unchecked_into(),
-		),
-		(
-			//5G9EuAHE1ewaTTRPyeGm13STTqxsajF9WVKpg1bh35rgtVZb
-			hex!["b4666a55b08b65f257c78a948d4aa428fba247764be3c69702e80c0374d02234"].into(),
-			//5FX6jk73aXkfB89eEpUE74xygU19NKxfMEaUVdsiSp3dYJp4
-			hex!["98d61a96cb6d5259a8ea823245fd8a53f58d51f2f52c581c6a2d3ae016510374"].into(),
-			//5CXwcwdEqn9viBimSSgwfFAmpQVuRbS1dCtTvn1gyUFRDc6V
-			hex!["14c5f51c097ab38f042e4fb2225fb0637ca5d59c2a1602b8616f496524d41142"].unchecked_into(),
-			//5EPuj7dCwX1aNkUbHMmz9XWzXgt84curabF7qf3WTttkfeZ7
-			hex!["671e1636d545a7861ebc5d89056ee278e85da03f007470855d9a39e8a08f51ea"].unchecked_into(),
-			//5H6TPJFzMs6iMm2o6NnUaVbFcpUvxcvPA4MvKFLV4aSf1J52
-			hex!["de82f0f9633d6eb0caeb1419ccf9e70bf881aee937450216884983f4681a3d76"].unchecked_into(),
-			//5H48UAJX9ouZ5qEBFjFD6d1ffvRRWnPzT22zE7finKyjo1q8
-			hex!["dcbcc5e56777e2ae4d4d118171e57cfaf612f41ba1cab0edd8f120ed8ffa3256"].unchecked_into(),
-			//5CUxxuRT3ph3yXwfRwSPiHa3jRn4v7EfzJFYdqJ7U2PeQcwK
-			hex!["1280bf02aa1a218a7ec29ee9b03b2fa82d88a8a74c1757054ecff1f72858de24"].unchecked_into(),
-			//5FfA7HwToNCjsizJFNNWksvJwSjtcL6ndfnfxVPBqpLx3Kmq
-			hex!["9efb6aac0eedd6a6a940ba3a726ac24d790b75c3800e9b411c81da9d2231693e"].unchecked_into(),
-			//5DyZuCeeUC38Y1F6osZ9TrpM3UEPXwbyHjDUDBxQZACDLVGc
-			hex!["037cc2ba66f9dee63f74786b80d6555c93eb64fc5c5f193a81caf40bb10c89317f"].unchecked_into(),
-		),
+        (
+        //5EHjoBVGQm4CNbdoeaozpAKGp9TTrfRuADvQ65kyiABZhYPk
+        hex!["62692ff7965729b21a10862da513beb42b7da54f321e35e2147983e1e53dc935"].into(),
+        //5DSShm3qptXjE5aK7aUoVCQ7ScgCwt8wbH7MzgNwtRg4FPJZ
+        hex!["3cd09eecf6faa579ff49a5bb8175c02244da1151cfa75b8b3fc9dcb15b4b281d"].into(),
+        //5DRQRDWEabzp8BkYjDWRmzBiBqc6DyyPKDcuogXXXgR9cVfr
+        hex!["3c05aebeb9e9740fc49fba44d36958cfebaed238a15e5d215d20c3b858c58d16"].unchecked_into(),
+        //5G8WWBAq4gpFLEnQjsxPkfYRdXNs3UkaeR8QG39HVjub8agw
+        hex!["b3d7b25de30f345bfb40e0fb78f86acc36a7edc045615d5dee2cb9539faa8219"].unchecked_into(),
+        //5Fvbhw7qHqrUXfErS8afAzPvpnbEk6BCXxMzoFTYk5Lg2dmD
+        hex!["aac2440bfa090b89b151bd32e664cf3a77646040d58beeca4c66a8727d78fa4c"].unchecked_into(),
+        //5E7qHbkqsViJ1R5gY9ADA71J6qHf1SCLkSqjWpSAie26otEf
+        hex!["5adb36d761304b31aa8a225bdbb22b756bfe301f974abf80e2ab0268b7ef5842"].unchecked_into(),
+        //5DHw6EUPcBkcmJx1twvpTUyQwJxFhqLWLd1MrtdabqvT1bBW
+        hex!["3652f90eb39b85570671aef2d5fef9050c13f8feb9f0684949febe7627338068"].unchecked_into(),
+        //5G9TjyiM7fpVoVBQx6iYTzpxUyoFEtu5bBSac3Esjj8Dh6BM
+        hex!["b491a4f377891c48b05b3caaa8344612b4bbd0833be3074affd96eb3ccc8a71c"].unchecked_into(),
+        //5EtD5Z2nJofRaRnsEVXYfVSB62zvepd9CnaSRC7VKjm5qByj
+        hex!["02caa76c7c5bf9eafc96f5c79625085e1cb30944ed40ae890f0319a1179db78ba5"].unchecked_into(),
+        ),
+        (
+        //5FsJoADMCmUQqmprSSqnyLPj7KAz7Kym6AzWbXMyEza7A5XH
+        hex!["a83f9b156daa23ac07dd3361514d1b9f1674904d35ce8ab422bc8e1e12dac70b"].into(),
+        //5GE6M2FBBChfGfatFvRmWSgJrvSuxVYB2HNA13Fb5EFMpjst
+        hex!["b819d8c01cbc46e23d9b79f7654f704a828fa1946bc8a97f56889daade1ced4e"].into(),
+        //5GxzB3oemXt3XskegqpVAMfCNQf1xxgSEwUz5tt97Xodg7fZ
+        hex!["d8d09f57c3ba6ab33c1ffda74aa70af40eade733d77c642a7159e2621c591203"].unchecked_into(),
+        //5EaM6zor3sPnqfYLM1CRu1RFPsyMkNa1B1r3J4itBSLs8mx8
+        hex!["6f13f7e727ef6b4094b346e351e66242b51fbbb6a2eac532b55389f1314d2d11"].unchecked_into(),
+        //5GbuPR9jeuLuzVyyXQ8i4UF22G7HTG9RMencHkqNPfQMgLix
+        hex!["c8bc5af37ae86784b073d2b88133cae60c268c31a1c2b108c92d3d16fc3a7d77"].unchecked_into(),
+        //5HSmZZmHPmkJvxETzfJph5RwYmLnqgRC49VwicCgu2raBPF1
+        hex!["ee0109e8a5ca0eb8970ad4e680e3d58f37fb36aa853a3b45c500392782e5507b"].unchecked_into(),
+        //5CicHPuqapt1GZxgJPeVM2g9rWh4T7o5VNJ8Zo2jrD9EoMwK
+        hex!["1ce8900e32afafaae694da8bf53856276cab7ba6d0c2c07a7a83ff6109bf1820"].unchecked_into(),
+        //5GpKeSKxv1KPPQd1UJw5ehKQ7PwG2opoZQkXfsQrW7HF22VP
+        hex!["d234f68df98ebdaae5574c8b1ac8862176856c16839f198942640d35d65a1067"].unchecked_into(),
+        //5DcKuWSZtehyqBnyyYTw5Dmostkz2Ayg1NJvt57V4HijEd4z
+        hex!["0322579289a9207bec9c24e1d38aba17c26b80c680b4ed31bd13af9f929d8beb15"].unchecked_into(),
+        ),
 	];
 
 	const ENDOWMENT: u128 = 1_000_000 * ROC;
