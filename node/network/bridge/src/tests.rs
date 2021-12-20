@@ -98,7 +98,7 @@ impl Network for TestNetwork {
 			.boxed()
 	}
 
-	async fn add_to_peers_set(
+	async fn set_reserved_peers(
 		&mut self,
 		_protocol: Cow<'static, str>,
 		_: HashSet<Multiaddr>,
@@ -106,13 +106,7 @@ impl Network for TestNetwork {
 		Ok(())
 	}
 
-	async fn remove_from_peers_set(
-		&mut self,
-		_protocol: Cow<'static, str>,
-		_: HashSet<Multiaddr>,
-	) -> Result<(), String> {
-		Ok(())
-	}
+	async fn remove_from_peers_set(&mut self, _protocol: Cow<'static, str>, _: Vec<PeerId>) {}
 
 	async fn start_request<AD: AuthorityDiscovery>(
 		&self,
@@ -149,14 +143,14 @@ impl validator_discovery::AuthorityDiscovery for TestAuthorityDiscovery {
 	async fn get_addresses_by_authority_id(
 		&mut self,
 		_authority: AuthorityDiscoveryId,
-	) -> Option<Vec<Multiaddr>> {
+	) -> Option<HashSet<Multiaddr>> {
 		None
 	}
 
-	async fn get_authority_id_by_peer_id(
+	async fn get_authority_ids_by_peer_id(
 		&mut self,
 		_peer_id: PeerId,
-	) -> Option<AuthorityDiscoveryId> {
+	) -> Option<HashSet<AuthorityDiscoveryId>> {
 		None
 	}
 }
