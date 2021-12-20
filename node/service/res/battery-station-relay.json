@@ -9,7 +9,7 @@
       0
     ]
   ],
-  "protocolId": "battery_station_relay",
+  "protocolId": "battery_station_relay_v2",
   "properties": {
     "tokenDecimals": 10,
     "tokenSymbol": "ZBS"
