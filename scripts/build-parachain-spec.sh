@@ -6,7 +6,7 @@ set -euxo pipefail
 
 OUTPUT_FILE=node/service/res/battery-station-relay.json
 PROD_CHAIN_NAME="Rococo Battery Station Relay Testnet"
-PROD_CHAIN_PROTOCOL_ID=battery_station_relay
+PROD_CHAIN_PROTOCOL_ID=battery_station_relay_v3
 PROD_CHAIN_ID=rococo_battery_station_relay_testnet
 STAGE_CHAIN=rococo-staging
 
