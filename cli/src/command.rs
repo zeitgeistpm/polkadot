@@ -92,6 +92,7 @@ impl SubstrateCli for Cli {
 			id
 		};
 		Ok(match id {
+		    "battery_station_relay" => Box::new(service::chain_spec::battery_station_config()?),
 			"kusama" => Box::new(service::chain_spec::kusama_config()?),
 			#[cfg(feature = "kusama-native")]
 			"kusama-dev" => Box::new(service::chain_spec::kusama_development_config()?),

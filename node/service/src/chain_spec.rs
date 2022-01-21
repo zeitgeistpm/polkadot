@@ -86,6 +86,9 @@ pub type DummyChainSpec = service::GenericChainSpec<(), Extensions>;
 #[cfg(not(feature = "polkadot-native"))]
 pub type PolkadotChainSpec = DummyChainSpec;
 
+// Dummy chain spec, but that is fine when we don't have the native runtime.
+pub type BatteryStationChainSpec = DummyChainSpec;
+
 /// The `ChainSpec` parameterized for the kusama runtime.
 #[cfg(feature = "kusama-native")]
 pub type KusamaChainSpec = service::GenericChainSpec<kusama::GenesisConfig, Extensions>;
@@ -135,6 +138,10 @@ impl sp_runtime::BuildStorage for RococoGenesisExt {
 		});
 		self.runtime_genesis_config.assimilate_storage(storage)
 	}
+}
+
+pub fn battery_station_config() -> Result<BatteryStationChainSpec, String> {
+	BatteryStationChainSpec::from_json_bytes(&include_bytes!("../res/battery-station-relay.json")[..])
 }
 
 pub fn polkadot_config() -> Result<PolkadotChainSpec, String> {
