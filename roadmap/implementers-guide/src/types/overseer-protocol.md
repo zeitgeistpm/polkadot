@@ -69,8 +69,8 @@ enum AllMessages {
     ApprovalDistribution(ApprovalDistributionMessage),
     GossipSupport(GossipSupportMessage),
     DisputeCoordinator(DisputeCoordinatorMessage),
-    DisputeParticipation(DisputeParticipationMessage),
     ChainSelection(ChainSelectionMessage),
+    PvfChecker(PvfCheckerMessage),
 }
 ```
 
@@ -387,7 +387,7 @@ enum CollatorProtocolMessage {
     ///
     /// The result sender should be informed when at least one parachain validator seconded the collation. It is also
     /// completely okay to just drop the sender.
-    DistributeCollation(CandidateReceipt, PoV, Option<oneshot::Sender<SignedFullStatement>>),
+    DistributeCollation(CandidateReceipt, PoV, Option<oneshot::Sender<CollationSecondedSignal>>),
     /// Fetch a collation under the given relay-parent for the given ParaId.
     FetchCollation(Hash, ParaId, ResponseChannel<(CandidateReceipt, PoV)>),
     /// Report a collator as having provided an invalid collation. This should lead to disconnect
@@ -441,7 +441,7 @@ enum DisputeCoordinatorMessage {
         pending_confirmation: oneshot::Sender<ImportStatementsResult>
     },
     /// Fetch a list of all recent disputes that the co-ordinator is aware of.
-    /// These are disputes which have occured any time in recent sessions, which may have already concluded.
+    /// These are disputes which have occurred any time in recent sessions, which may have already concluded.
     RecentDisputes(ResponseChannel<Vec<(SessionIndex, CandidateHash)>>),
     /// Fetch a list of all active disputes that the co-ordinator is aware of.
     /// These disputes are either unconcluded or recently concluded.
@@ -473,30 +473,6 @@ pub enum ImportStatementsResult {
 }
 ```
 
-## Dispute Participation Message
-
-Messages received by the [Dispute Participation subsystem](../node/disputes/dispute-participation.md)
-
-This subsystem simply executes requests to evaluate a candidate.
-
-```rust
-enum DisputeParticipationMessage {
-    /// Validate a candidate for the purposes of participating in a dispute.
-    Participate {
-        /// The hash of the candidate
-        candidate_hash: CandidateHash,
-        /// The candidate receipt itself.
-        candidate_receipt: CandidateReceipt,
-        /// The session the candidate appears in.
-        session: SessionIndex,
-        /// The number of validators in the session.
-        n_validators: u32,
-        /// Give immediate feedback on whether the candidate was available or
-        /// not.
-        report_availability: oneshot::Sender<bool>,
-    }
-}
-```
 
 ## Dispute Distribution Message
 
@@ -567,7 +543,7 @@ enum NetworkBridgeMessage {
     /// `PeerConnected` events from the network bridge.
     ConnectToValidators {
         /// Ids of the validators to connect to.
-        validator_ids: Vec<AuthorityDiscoveryId>,
+        validator_ids: HashSet<AuthorityDiscoveryId>,
         /// The underlying protocol to use for this request.
         peer_set: PeerSet,
         /// Sends back the number of `AuthorityDiscoveryId`s which
@@ -699,10 +675,12 @@ The Runtime API subsystem is responsible for providing an interface to the state
 
 This is fueled by an auxiliary type encapsulating all request types defined in the Runtime API section of the guide.
 
-> TODO: link to the Runtime API section. Not possible currently because of https://github.com/Michael-F-Bryan/mdbook-linkcheck/issues/25. Once v0.7.1 is released it will work.
+> To do: link to the Runtime API section. Not possible currently because of https://github.com/Michael-F-Bryan/mdbook-linkcheck/issues/25. Once v0.7.1 is released it will work.
 
 ```rust
 enum RuntimeApiRequest {
+    /// Get the version of the runtime API at the given parent hash, if any.
+    Version(ResponseChannel<u32>),
     /// Get the current validator set.
     Validators(ResponseChannel<Vec<ValidatorId>>),
     /// Get the validator groups and rotation info.
@@ -747,6 +725,8 @@ enum RuntimeApiRequest {
 enum RuntimeApiMessage {
     /// Make a request of the runtime API against the post-state of the given relay-parent.
     Request(Hash, RuntimeApiRequest),
+    /// Get the version of the runtime API at the given parent hash, if any.
+    Version(Hash, ResponseChannel<Option<u32>>)
 }
 ```
 
@@ -776,6 +756,25 @@ Various modules request that the [Candidate Validation subsystem](../node/utilit
 
 ```rust
 
+/// The outcome of the candidate-validation's PVF pre-check request.
+pub enum PreCheckOutcome {
+    /// The PVF has been compiled successfully within the given constraints.
+    Valid,
+    /// The PVF could not be compiled. This variant is used when the candidate-validation subsystem
+    /// can be sure that the PVF is invalid. To give a couple of examples: a PVF that cannot be
+    /// decompressed or that does not represent a structurally valid WebAssembly file.
+    Invalid,
+    /// This variant is used when the PVF cannot be compiled but for other reasons that are not
+    /// included into [`PreCheckOutcome::Invalid`]. This variant can indicate that the PVF in
+    /// question is invalid, however it is not necessary that PVF that received this judgement
+    /// is invalid.
+    ///
+    /// For example, if during compilation the preparation worker was killed we cannot be sure why
+    /// it happened: because the PVF was malicious made the worker to use too much memory or its
+    /// because the host machine is under severe memory pressure and it decided to kill the worker.
+    Failed,
+}
+
 /// Result of the validation of the candidate.
 enum ValidationResult {
     /// Candidate is valid, and here are the outputs and the validation data used to form inputs.
@@ -784,6 +783,9 @@ enum ValidationResult {
     /// Candidate is invalid.
     Invalid,
 }
+
+const BACKING_EXECUTION_TIMEOUT: Duration = 2 seconds;
+const APPROVAL_EXECUTION_TIMEOUT: Duration = 6 seconds;
 
 /// Messages received by the Validation subsystem.
 ///
@@ -807,6 +809,7 @@ pub enum CandidateValidationMessage {
     ValidateFromChainState(
         CandidateDescriptor,
         Arc<PoV>,
+        Duration, // Execution timeout.
         oneshot::Sender<Result<ValidationResult, ValidationFailed>>,
     ),
     /// Validate a candidate with provided, exhaustive parameters for validation.
@@ -823,9 +826,30 @@ pub enum CandidateValidationMessage {
         ValidationCode,
         CandidateDescriptor,
         Arc<PoV>,
+        Duration, // Execution timeout.
         oneshot::Sender<Result<ValidationResult, ValidationFailed>>,
     ),
+    /// Try to compile the given validation code and send back
+    /// the outcome.
+    ///
+    /// The validation code is specified by the hash and will be queried from the runtime API at the
+    /// given relay-parent.
+    PreCheck(
+        // Relay-parent
+        Hash,
+        ValidationCodeHash,
+        oneshot::Sender<PreCheckOutcome>,
+    ),
 }
+```
+
+## PVF Pre-checker Message
+
+Currently, the PVF pre-checker subsystem receives no specific messages.
+
+```rust
+/// Non-instantiable message type
+pub enum PvfCheckerMessage { }
 ```
 
 [NBE]: ../network.md#network-bridge-event

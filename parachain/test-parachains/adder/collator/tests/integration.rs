@@ -21,10 +21,9 @@ const PUPPET_EXE: &str = env!("CARGO_BIN_EXE_adder_collator_puppet_worker");
 
 // If this test is failing, make sure to run all tests with the `real-overseer` feature being enabled.
 #[substrate_test_utils::test]
-async fn collating_using_adder_collator(task_executor: sc_service::TaskExecutor) {
+async fn collating_using_adder_collator() {
+	use polkadot_primitives::v2::Id as ParaId;
 	use sp_keyring::AccountKeyring::*;
-	use futures::join;
-	use polkadot_primitives::v1::Id as ParaId;
 
 	let mut builder = sc_cli::LoggerBuilder::new("");
 	builder.with_colors(false);
@@ -32,59 +31,56 @@ async fn collating_using_adder_collator(task_executor: sc_service::TaskExecutor)
 
 	let para_id = ParaId::from(100);
 
+	let alice_config = polkadot_test_service::node_config(
+		|| {},
+		tokio::runtime::Handle::current(),
+		Alice,
+		Vec::new(),
+		true,
+	);
+
 	// start alice
-	let alice = polkadot_test_service::run_validator_node(
-		task_executor.clone(),
-		Alice, || {},
-		vec![],
-		Some(PUPPET_EXE.into()),
+	let alice = polkadot_test_service::run_validator_node(alice_config, Some(PUPPET_EXE.into()));
+
+	let bob_config = polkadot_test_service::node_config(
+		|| {},
+		tokio::runtime::Handle::current(),
+		Bob,
+		vec![alice.addr.clone()],
+		true,
 	);
 
 	// start bob
-	let bob = polkadot_test_service::run_validator_node(
-		task_executor.clone(),
-		Bob,
-		|| {},
-		vec![alice.addr.clone()],
-		Some(PUPPET_EXE.into()),
-	);
+	let bob = polkadot_test_service::run_validator_node(bob_config, Some(PUPPET_EXE.into()));
 
 	let collator = test_parachain_adder_collator::Collator::new();
 
 	// register parachain
 	alice
-		.register_parachain(
-			para_id,
-			collator.validation_code().to_vec(),
-			collator.genesis_head(),
-		)
+		.register_parachain(para_id, collator.validation_code().to_vec(), collator.genesis_head())
 		.await
 		.unwrap();
 
 	// run the collator node
 	let mut charlie = polkadot_test_service::run_collator_node(
-		task_executor.clone(),
+		tokio::runtime::Handle::current(),
 		Charlie,
 		|| {},
 		vec![alice.addr.clone(), bob.addr.clone()],
 		collator.collator_key(),
 	);
 
-	charlie.register_collator(
-		collator.collator_key(),
-		para_id,
-		collator.create_collation_function(charlie.task_manager.spawn_handle()),
-	).await;
+	charlie
+		.register_collator(
+			collator.collator_key(),
+			para_id,
+			collator.create_collation_function(charlie.task_manager.spawn_handle()),
+		)
+		.await;
 
 	// Wait until the parachain has 4 blocks produced.
 	collator.wait_for_blocks(4).await;
 
 	// Wait until the collator received `12` seconded statements for its collations.
 	collator.wait_for_seconded_collations(12).await;
-
-	join!(
-		alice.task_manager.clean_shutdown(),
-		bob.task_manager.clean_shutdown(),
-		charlie.task_manager.clean_shutdown(),
-	);
 }

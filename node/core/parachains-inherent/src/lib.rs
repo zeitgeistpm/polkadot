@@ -26,12 +26,9 @@
 
 use futures::{select, FutureExt};
 use polkadot_node_subsystem::{
-	overseer::Handle,
-	messages::ProvisionerMessage, errors::SubsystemError,
+	errors::SubsystemError, messages::ProvisionerMessage, overseer::Handle,
 };
-use polkadot_primitives::v1::{
-	Block, Hash, InherentData as ParachainsInherentData,
-};
+use polkadot_primitives::v2::{Block, Hash, InherentData as ParachainsInherentData};
 use sp_blockchain::HeaderBackend;
 use sp_runtime::generic::BlockId;
 use std::time;
@@ -45,6 +42,11 @@ pub struct ParachainsInherentDataProvider {
 }
 
 impl ParachainsInherentDataProvider {
+	/// Create a [`Self`] directly from some [`ParachainsInherentData`].
+	pub fn from_data(inherent_data: ParachainsInherentData) -> Self {
+		Self { inherent_data }
+	}
+
 	/// Create a new instance of the [`ParachainsInherentDataProvider`].
 	pub async fn create<C: HeaderBackend<Block>>(
 		client: &C,
@@ -54,13 +56,18 @@ impl ParachainsInherentDataProvider {
 		let pid = async {
 			let (sender, receiver) = futures::channel::oneshot::channel();
 			overseer.wait_for_activation(parent, sender).await;
-			receiver.await.map_err(|_| Error::ClosedChannelAwaitingActivation)?.map_err(|e| Error::Subsystem(e))?;
+			receiver
+				.await
+				.map_err(|_| Error::ClosedChannelAwaitingActivation)?
+				.map_err(|e| Error::Subsystem(e))?;
 
 			let (sender, receiver) = futures::channel::oneshot::channel();
-			overseer.send_msg(
-				ProvisionerMessage::RequestInherentData(parent, sender),
-				std::any::type_name::<Self>(),
-			).await;
+			overseer
+				.send_msg(
+					ProvisionerMessage::RequestInherentData(parent, sender),
+					std::any::type_name::<Self>(),
+				)
+				.await;
 
 			receiver.await.map_err(|_| Error::ClosedChannelAwaitingInherentData)
 		};
@@ -86,7 +93,7 @@ impl ParachainsInherentDataProvider {
 				parent_header,
 			},
 			Err(err) => {
-				tracing::debug!(
+				gum::debug!(
 					?err,
 					"Could not get provisioner inherent data; injecting default data",
 				);
@@ -96,7 +103,7 @@ impl ParachainsInherentDataProvider {
 					disputes: Vec::new(),
 					parent_header,
 				}
-			}
+			},
 		};
 
 		Ok(Self { inherent_data })
@@ -105,17 +112,18 @@ impl ParachainsInherentDataProvider {
 
 #[async_trait::async_trait]
 impl sp_inherents::InherentDataProvider for ParachainsInherentDataProvider {
-	fn provide_inherent_data(&self, inherent_data: &mut sp_inherents::InherentData) -> Result<(), sp_inherents::Error> {
-		inherent_data.put_data(
-			polkadot_primitives::v1::PARACHAINS_INHERENT_IDENTIFIER,
-			&self.inherent_data,
-		)
+	fn provide_inherent_data(
+		&self,
+		dst_inherent_data: &mut sp_inherents::InherentData,
+	) -> Result<(), sp_inherents::Error> {
+		dst_inherent_data
+			.put_data(polkadot_primitives::v2::PARACHAINS_INHERENT_IDENTIFIER, &self.inherent_data)
 	}
 
 	async fn try_handle_error(
 		&self,
-		_: &sp_inherents::InherentIdentifier,
-		_: &[u8],
+		_identifier: &sp_inherents::InherentIdentifier,
+		_error: &[u8],
 	) -> Option<Result<(), sp_inherents::Error>> {
 		// Inherent isn't checked and can not return any error
 		None

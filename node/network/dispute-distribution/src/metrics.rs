@@ -14,9 +14,13 @@
 // You should have received a copy of the GNU General Public License
 // along with Polkadot.  If not, see <http://www.gnu.org/licenses/>.
 
-use polkadot_node_subsystem_util::metrics::prometheus::{Counter, U64, Registry, PrometheusError, CounterVec, Opts};
-use polkadot_node_subsystem_util::metrics::prometheus;
-use polkadot_node_subsystem_util::metrics;
+use polkadot_node_subsystem_util::{
+	metrics,
+	metrics::{
+		prometheus,
+		prometheus::{Counter, CounterVec, Opts, PrometheusError, Registry, U64},
+	},
+};
 
 /// Label for success counters.
 pub const SUCCEEDED: &'static str = "succeeded";
@@ -42,6 +46,9 @@ struct MetricsInner {
 	///
 	/// We both have successful imports and failed imports here.
 	imported_requests: CounterVec<U64>,
+
+	/// The duration of issued dispute request to response.
+	time_dispute_request: prometheus::Histogram,
 }
 
 impl Metrics {
@@ -57,7 +64,7 @@ impl Metrics {
 		}
 	}
 
-	/// Increment counter on served chunks.
+	/// Increment counter on served disputes.
 	pub fn on_received_request(&self) {
 		if let Some(metrics) = &self.0 {
 			metrics.received_requests.inc()
@@ -70,6 +77,11 @@ impl Metrics {
 			metrics.imported_requests.with_label_values(&[label]).inc()
 		}
 	}
+
+	/// Get a timer to time request/response duration.
+	pub fn time_dispute_request(&self) -> Option<metrics::prometheus::prometheus::HistogramTimer> {
+		self.0.as_ref().map(|metrics| metrics.time_dispute_request.start_timer())
+	}
 }
 
 impl metrics::Metrics for Metrics {
@@ -78,16 +90,16 @@ impl metrics::Metrics for Metrics {
 			sent_requests: prometheus::register(
 				CounterVec::new(
 					Opts::new(
-						"parachain_dispute_distribution_sent_requests",
+						"polkadot_parachain_dispute_distribution_sent_requests",
 						"Total number of sent requests.",
 					),
-					&["success"]
+					&["success"],
 				)?,
 				registry,
 			)?,
 			received_requests: prometheus::register(
 				Counter::new(
-					"parachain_dispute_distribution_received_requests",
+					"polkadot_parachain_dispute_distribution_received_requests",
 					"Total number of received dispute requests.",
 				)?,
 				registry,
@@ -95,15 +107,21 @@ impl metrics::Metrics for Metrics {
 			imported_requests: prometheus::register(
 				CounterVec::new(
 					Opts::new(
-						"parachain_dispute_distribution_imported_requests",
+						"polkadot_parachain_dispute_distribution_imported_requests",
 						"Total number of imported requests.",
 					),
-					&["success"]
+					&["success"],
 				)?,
+				registry,
+			)?,
+			time_dispute_request: prometheus::register(
+				prometheus::Histogram::with_opts(prometheus::HistogramOpts::new(
+					"polkadot_parachain_dispute_distribution_time_dispute_request",
+					"Time needed for dispute votes to get confirmed/fail getting transmitted.",
+				))?,
 				registry,
 			)?,
 		};
 		Ok(Metrics(Some(metrics)))
 	}
 }
-

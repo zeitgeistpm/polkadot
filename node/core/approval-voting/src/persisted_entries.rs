@@ -20,18 +20,17 @@
 //! Within that context, things are plain-old-data. Within this module,
 //! data and logic are intertwined.
 
-use polkadot_node_primitives::approval::{DelayTranche, RelayVRFStory, AssignmentCert};
-use polkadot_primitives::v1::{
-	ValidatorIndex, CandidateReceipt, SessionIndex, GroupIndex, CoreIndex,
-	Hash, CandidateHash, BlockNumber, ValidatorSignature,
+use polkadot_node_primitives::approval::{AssignmentCert, DelayTranche, RelayVRFStory};
+use polkadot_primitives::v2::{
+	BlockNumber, CandidateHash, CandidateReceipt, CoreIndex, GroupIndex, Hash, SessionIndex,
+	ValidatorIndex, ValidatorSignature,
 };
 use sp_consensus_slots::Slot;
 
+use bitvec::{order::Lsb0 as BitOrderLsb0, slice::BitSlice, vec::BitVec};
 use std::collections::BTreeMap;
-use bitvec::{slice::BitSlice, vec::BitVec, order::Lsb0 as BitOrderLsb0};
 
-use super::time::Tick;
-use super::criteria::OurAssignment;
+use super::{criteria::OurAssignment, time::Tick};
 
 /// Metadata regarding a specific tranche of assignments for a specific candidate.
 #[derive(Debug, Clone, PartialEq)]
@@ -81,7 +80,7 @@ pub struct ApprovalEntry {
 	our_assignment: Option<OurAssignment>,
 	our_approval_sig: Option<ValidatorSignature>,
 	// `n_validators` bits.
-	assignments: BitVec<BitOrderLsb0, u8>,
+	assignments: BitVec<u8, BitOrderLsb0>,
 	approved: bool,
 }
 
@@ -93,7 +92,7 @@ impl ApprovalEntry {
 		our_assignment: Option<OurAssignment>,
 		our_approval_sig: Option<ValidatorSignature>,
 		// `n_validators` bits.
-		assignments: BitVec<BitOrderLsb0, u8>,
+		assignments: BitVec<u8, BitOrderLsb0>,
 		approved: bool,
 	) -> Self {
 		Self { tranches, backing_group, our_assignment, our_approval_sig, assignments, approved }
@@ -105,11 +104,14 @@ impl ApprovalEntry {
 	}
 
 	// Note that our assignment is triggered. No-op if already triggered.
-	pub fn trigger_our_assignment(&mut self, tick_now: Tick)
-		-> Option<(AssignmentCert, ValidatorIndex, DelayTranche)>
-	{
+	pub fn trigger_our_assignment(
+		&mut self,
+		tick_now: Tick,
+	) -> Option<(AssignmentCert, ValidatorIndex, DelayTranche)> {
 		let our = self.our_assignment.as_mut().and_then(|a| {
-			if a.triggered() { return None }
+			if a.triggered() {
+				return None
+			}
 			a.mark_triggered();
 
 			Some(a.clone())
@@ -143,22 +145,16 @@ impl ApprovalEntry {
 		let idx = match self.tranches.iter().position(|t| t.tranche >= tranche) {
 			Some(pos) => {
 				if self.tranches[pos].tranche > tranche {
-					self.tranches.insert(pos, TrancheEntry {
-						tranche: tranche,
-						assignments: Vec::new(),
-					});
+					self.tranches.insert(pos, TrancheEntry { tranche, assignments: Vec::new() });
 				}
 
 				pos
-			}
+			},
 			None => {
-				self.tranches.push(TrancheEntry {
-					tranche: tranche,
-					assignments: Vec::new(),
-				});
+				self.tranches.push(TrancheEntry { tranche, assignments: Vec::new() });
 
 				self.tranches.len() - 1
-			}
+			},
 		};
 
 		self.tranches[idx].assignments.push((validator_index, tick_now));
@@ -167,16 +163,17 @@ impl ApprovalEntry {
 
 	// Produce a bitvec indicating the assignments of all validators up to and
 	// including `tranche`.
-	pub fn assignments_up_to(&self, tranche: DelayTranche) -> BitVec<BitOrderLsb0, u8> {
-		self.tranches.iter()
-			.take_while(|e| e.tranche <= tranche)
-			.fold(bitvec::bitvec![BitOrderLsb0, u8; 0; self.assignments.len()], |mut a, e| {
+	pub fn assignments_up_to(&self, tranche: DelayTranche) -> BitVec<u8, BitOrderLsb0> {
+		self.tranches.iter().take_while(|e| e.tranche <= tranche).fold(
+			bitvec::bitvec![u8, BitOrderLsb0; 0; self.assignments.len()],
+			|mut a, e| {
 				for &(v, _) in &e.assignments {
 					a.set(v.0 as _, true);
 				}
 
 				a
-			})
+			},
+		)
 	}
 
 	/// Whether the approval entry is approved
@@ -220,12 +217,6 @@ impl ApprovalEntry {
 			(None, None)
 		}
 	}
-
-	/// For tests: set our assignment.
-	#[cfg(test)]
-	pub fn set_our_assignment(&mut self, our_assignment: OurAssignment) {
-		self.our_assignment = Some(our_assignment);
-	}
 }
 
 impl From<crate::approval_db::v1::ApprovalEntry> for ApprovalEntry {
@@ -262,12 +253,12 @@ pub struct CandidateEntry {
 	// Assignments are based on blocks, so we need to track assignments separately
 	// based on the block we are looking at.
 	pub block_assignments: BTreeMap<Hash, ApprovalEntry>,
-	pub approvals: BitVec<BitOrderLsb0, u8>,
+	pub approvals: BitVec<u8, BitOrderLsb0>,
 }
 
 impl CandidateEntry {
 	/// Access the bit-vec of approvals.
-	pub fn approvals(&self) -> &BitSlice<BitOrderLsb0, u8> {
+	pub fn approvals(&self) -> &BitSlice<u8, BitOrderLsb0> {
 		&self.approvals
 	}
 
@@ -297,15 +288,6 @@ impl CandidateEntry {
 	pub fn approval_entry(&self, block_hash: &Hash) -> Option<&ApprovalEntry> {
 		self.block_assignments.get(block_hash)
 	}
-
-	#[cfg(test)]
-	pub fn add_approval_entry(
-		&mut self,
-		block_hash: Hash,
-		approval_entry: ApprovalEntry,
-	) {
-		self.block_assignments.insert(block_hash, approval_entry);
-	}
 }
 
 impl From<crate::approval_db::v1::CandidateEntry> for CandidateEntry {
@@ -313,7 +295,11 @@ impl From<crate::approval_db::v1::CandidateEntry> for CandidateEntry {
 		CandidateEntry {
 			candidate: entry.candidate,
 			session: entry.session,
-			block_assignments: entry.block_assignments.into_iter().map(|(h, ae)| (h, ae.into())).collect(),
+			block_assignments: entry
+				.block_assignments
+				.into_iter()
+				.map(|(h, ae)| (h, ae.into()))
+				.collect(),
 			approvals: entry.approvals,
 		}
 	}
@@ -324,7 +310,11 @@ impl From<CandidateEntry> for crate::approval_db::v1::CandidateEntry {
 		Self {
 			candidate: entry.candidate,
 			session: entry.session,
-			block_assignments: entry.block_assignments.into_iter().map(|(h, ae)| (h, ae.into())).collect(),
+			block_assignments: entry
+				.block_assignments
+				.into_iter()
+				.map(|(h, ae)| (h, ae.into()))
+				.collect(),
 			approvals: entry.approvals,
 		}
 	}
@@ -346,7 +336,7 @@ pub struct BlockEntry {
 	// A bitfield where the i'th bit corresponds to the i'th candidate in `candidates`.
 	// The i'th bit is `true` iff the candidate has been approved in the context of this
 	// block. The block can be considered approved if the bitfield has all bits set to `true`.
-	pub approved_bitfield: BitVec<BitOrderLsb0, u8>,
+	pub approved_bitfield: BitVec<u8, BitOrderLsb0>,
 	pub children: Vec<Hash>,
 }
 
@@ -360,7 +350,9 @@ impl BlockEntry {
 
 	/// Whether a candidate is approved in the bitfield.
 	pub fn is_candidate_approved(&self, candidate_hash: &CandidateHash) -> bool {
-		self.candidates.iter().position(|(_, h)| h == candidate_hash)
+		self.candidates
+			.iter()
+			.position(|(_, h)| h == candidate_hash)
 			.and_then(|p| self.approved_bitfield.get(p).map(|b| *b))
 			.unwrap_or(false)
 	}
@@ -372,33 +364,13 @@ impl BlockEntry {
 
 	/// Iterate over all unapproved candidates.
 	pub fn unapproved_candidates(&self) -> impl Iterator<Item = CandidateHash> + '_ {
-		self.approved_bitfield.iter().enumerate().filter_map(move |(i, a)| if !*a {
-			Some(self.candidates[i].1)
-		} else {
-			None
+		self.approved_bitfield.iter().enumerate().filter_map(move |(i, a)| {
+			if !*a {
+				Some(self.candidates[i].1)
+			} else {
+				None
+			}
 		})
-	}
-
-	/// For tests: Add a candidate to the block entry. Returns the
-	/// index where the candidate was added.
-	///
-	/// Panics if the core is already used.
-	#[cfg(test)]
-	pub fn add_candidate(&mut self, core: CoreIndex, candidate_hash: CandidateHash) -> usize {
-		let pos = self.candidates
-			.binary_search_by_key(&core, |(c, _)| *c)
-			.unwrap_err();
-
-		self.candidates.insert(pos, (core, candidate_hash));
-
-		// bug in bitvec?
-		if pos < self.approved_bitfield.len() {
-			self.approved_bitfield.insert(pos, false);
-		} else {
-			self.approved_bitfield.push(false);
-		}
-
-		pos
 	}
 
 	/// Get the slot of the block.

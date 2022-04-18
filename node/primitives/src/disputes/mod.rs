@@ -14,23 +14,20 @@
 // You should have received a copy of the GNU General Public License
 // along with Polkadot.  If not, see <http://www.gnu.org/licenses/>.
 
-use std::convert::TryInto;
-
 use parity_scale_codec::{Decode, Encode};
 
 use sp_application_crypto::AppKey;
-use sp_keystore::{CryptoStore, SyncCryptoStorePtr, Error as KeystoreError};
+use sp_keystore::{CryptoStore, Error as KeystoreError, SyncCryptoStorePtr};
 
-use polkadot_primitives::v1::{
-	CandidateHash, CandidateReceipt, DisputeStatement, InvalidDisputeStatementKind,
-	SessionIndex, ValidDisputeStatementKind, ValidatorId, ValidatorIndex,
-	ValidatorSignature, SigningContext,
+use super::{Statement, UncheckedSignedFullStatement};
+use polkadot_primitives::v2::{
+	CandidateHash, CandidateReceipt, DisputeStatement, InvalidDisputeStatementKind, SessionIndex,
+	SigningContext, ValidDisputeStatementKind, ValidatorId, ValidatorIndex, ValidatorSignature,
 };
-use super::{UncheckedSignedFullStatement, Statement};
 
 /// `DisputeMessage` and related types.
 mod message;
-pub use message::{DisputeMessage, UncheckedDisputeMessage, Error as DisputeMessageCheckError};
+pub use message::{DisputeMessage, Error as DisputeMessageCheckError, UncheckedDisputeMessage};
 
 /// A checked dispute statement from an associated validator.
 #[derive(Debug, Clone)]
@@ -56,9 +53,8 @@ pub struct CandidateVotes {
 impl CandidateVotes {
 	/// Get the set of all validators who have votes in the set, ascending.
 	pub fn voted_indices(&self) -> Vec<ValidatorIndex> {
-		let mut v: Vec<_> = self.valid.iter().map(|x| x.1).chain(
-			self.invalid.iter().map(|x| x.1)
-		).collect();
+		let mut v: Vec<_> =
+			self.valid.iter().map(|x| x.1).chain(self.invalid.iter().map(|x| x.1)).collect();
 
 		v.sort();
 		v.dedup();
@@ -68,6 +64,26 @@ impl CandidateVotes {
 }
 
 impl SignedDisputeStatement {
+	/// Create a new `SignedDisputeStatement` from information
+	/// that is available on-chain, and hence already can be trusted.
+	///
+	/// Attention: Not to be used other than with guaranteed fetches.
+	pub fn new_unchecked_from_trusted_source(
+		dispute_statement: DisputeStatement,
+		candidate_hash: CandidateHash,
+		session_index: SessionIndex,
+		validator_public: ValidatorId,
+		validator_signature: ValidatorSignature,
+	) -> Self {
+		SignedDisputeStatement {
+			dispute_statement,
+			candidate_hash,
+			validator_public,
+			validator_signature,
+			session_index,
+		}
+	}
+
 	/// Create a new `SignedDisputeStatement`, which is only possible by checking the signature.
 	pub fn new_checked(
 		dispute_statement: DisputeStatement,
@@ -76,18 +92,15 @@ impl SignedDisputeStatement {
 		validator_public: ValidatorId,
 		validator_signature: ValidatorSignature,
 	) -> Result<Self, ()> {
-		dispute_statement.check_signature(
-			&validator_public,
-			candidate_hash,
-			session_index,
-			&validator_signature,
-		).map(|_| SignedDisputeStatement {
-			dispute_statement,
-			candidate_hash,
-			validator_public,
-			validator_signature,
-			session_index,
-		})
+		dispute_statement
+			.check_signature(&validator_public, candidate_hash, session_index, &validator_signature)
+			.map(|_| SignedDisputeStatement {
+				dispute_statement,
+				candidate_hash,
+				validator_public,
+				validator_signature,
+				session_index,
+			})
 	}
 
 	/// Sign this statement with the given keystore and key. Pass `valid = true` to
@@ -111,10 +124,12 @@ impl SignedDisputeStatement {
 			ValidatorId::ID,
 			&validator_public.clone().into(),
 			&data,
-		).await?;
+		)
+		.await?;
 
 		let signature = match signature {
-			Some(sig) => sig.try_into().map_err(|_| KeystoreError::KeyNotSupported(ValidatorId::ID))?,
+			Some(sig) =>
+				sig.try_into().map_err(|_| KeystoreError::KeyNotSupported(ValidatorId::ID))?,
 			None => return Ok(None),
 		};
 

@@ -23,8 +23,10 @@ use super::*;
 /// which acts as the gateway to constructing the overseer.
 pub(crate) fn impl_misc(info: &OverseerInfo) -> proc_macro2::TokenStream {
 	let overseer_name = info.overseer_name.clone();
-	let subsystem_sender_name = Ident::new(&(overseer_name.to_string() + "SubsystemSender"), overseer_name.span());
-	let subsystem_ctx_name = Ident::new(&(overseer_name.to_string() + "SubsystemContext"), overseer_name.span());
+	let subsystem_sender_name =
+		Ident::new(&(overseer_name.to_string() + "SubsystemSender"), overseer_name.span());
+	let subsystem_ctx_name =
+		Ident::new(&(overseer_name.to_string() + "SubsystemContext"), overseer_name.span());
 	let consumes = &info.consumes();
 	let signal = &info.extern_signal_ty;
 	let wrapper_message = &info.message_wrapper;
@@ -110,6 +112,7 @@ pub(crate) fn impl_misc(info: &OverseerInfo) -> proc_macro2::TokenStream {
 				>,
 			signals_received: SignalsReceived,
 			pending_incoming: Option<(usize, M)>,
+			name: &'static str
 		}
 
 		impl<M> #subsystem_ctx_name<M> {
@@ -119,6 +122,7 @@ pub(crate) fn impl_misc(info: &OverseerInfo) -> proc_macro2::TokenStream {
 				messages: SubsystemIncomingMessages<M>,
 				to_subsystems: ChannelsOut,
 				to_overseer: #support_crate ::metered::UnboundedMeteredSender<#support_crate:: ToOverseer>,
+				name: &'static str
 			) -> Self {
 				let signals_received = SignalsReceived::default();
 				#subsystem_ctx_name {
@@ -131,7 +135,12 @@ pub(crate) fn impl_misc(info: &OverseerInfo) -> proc_macro2::TokenStream {
 					to_overseer,
 					signals_received,
 					pending_incoming: None,
+					name
 				}
+			}
+
+			fn name(&self) -> &'static str {
+				self.name
 			}
 		}
 
@@ -227,6 +236,7 @@ pub(crate) fn impl_misc(info: &OverseerInfo) -> proc_macro2::TokenStream {
 			{
 				self.to_overseer.unbounded_send(#support_crate ::ToOverseer::SpawnJob {
 					name,
+					subsystem: Some(self.name()),
 					s,
 				}).map_err(|_| #support_crate ::OverseerError::TaskSpawn(name))?;
 				Ok(())
@@ -237,6 +247,7 @@ pub(crate) fn impl_misc(info: &OverseerInfo) -> proc_macro2::TokenStream {
 			{
 				self.to_overseer.unbounded_send(#support_crate ::ToOverseer::SpawnBlockingJob {
 					name,
+					subsystem: Some(self.name()),
 					s,
 				}).map_err(|_| #support_crate ::OverseerError::TaskSpawn(name))?;
 				Ok(())

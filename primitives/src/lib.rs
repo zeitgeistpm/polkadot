@@ -17,8 +17,16 @@
 //! Polkadot types shared between the runtime and the Node-side code.
 
 #![warn(missing_docs)]
-
 #![cfg_attr(not(feature = "std"), no_std)]
 
-pub mod v0;
-pub mod v1;
+// `v2` is currently the latest stable version of the runtime API.
+pub mod v2;
+
+// The 'staging' version is special - while other versions are set in stone,
+// the staging version is malleable. Once it's released, it gets the next
+// version number.
+pub mod vstaging;
+
+// `runtime_api` contains the actual API implementation. It contains stable and
+// unstable functions.
+pub mod runtime_api;

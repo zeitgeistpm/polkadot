@@ -14,19 +14,23 @@
 // You should have received a copy of the GNU General Public License
 // along with Polkadot.  If not, see <http://www.gnu.org/licenses/>.
 
-use std::time::Duration;
-use futures::{future, Future, executor};
+use super::*;
 use assert_matches::assert_matches;
+use futures::{executor, future, Future};
+use polkadot_node_network_protocol::{our_view, view, ObservedRole};
+use polkadot_node_primitives::approval::{
+	AssignmentCertKind, VRFOutput, VRFProof, RELAY_VRF_MODULO_CONTEXT,
+};
 use polkadot_node_subsystem::messages::{AllMessages, ApprovalCheckError};
 use polkadot_node_subsystem_test_helpers as test_helpers;
 use polkadot_node_subsystem_util::TimeoutExt as _;
-use polkadot_node_network_protocol::{view, ObservedRole};
-use polkadot_node_primitives::approval::{
-	AssignmentCertKind, RELAY_VRF_MODULO_CONTEXT, VRFOutput, VRFProof,
-};
-use super::*;
+use std::time::Duration;
 
 type VirtualOverseer = test_helpers::TestSubsystemContextHandle<ApprovalDistributionMessage>;
+
+fn dummy_signature() -> polkadot_primitives::v2::ValidatorSignature {
+	sp_core::crypto::UncheckedFrom::unchecked_from([1u8; 64])
+}
 
 fn test_harness<T: Future<Output = VirtualOverseer>>(
 	mut state: State,
@@ -34,10 +38,7 @@ fn test_harness<T: Future<Output = VirtualOverseer>>(
 ) -> State {
 	let _ = env_logger::builder()
 		.is_test(true)
-		.filter(
-			Some(LOG_TARGET),
-			log::LevelFilter::Trace,
-		)
+		.filter(Some(LOG_TARGET), log::LevelFilter::Trace)
 		.try_init();
 
 	let pool = sp_core::testing::TaskExecutor::new();
@@ -52,14 +53,17 @@ fn test_harness<T: Future<Output = VirtualOverseer>>(
 		futures::pin_mut!(test_fut);
 		futures::pin_mut!(subsystem);
 
-		executor::block_on(future::join(async move {
-			let mut overseer = test_fut.await;
-			overseer
-				.send(FromOverseer::Signal(OverseerSignal::Conclude))
-				.timeout(TIMEOUT)
-				.await
-				.expect("Conclude send timeout");
-		}, subsystem));
+		executor::block_on(future::join(
+			async move {
+				let mut overseer = test_fut.await;
+				overseer
+					.send(FromOverseer::Signal(OverseerSignal::Conclude))
+					.timeout(TIMEOUT)
+					.await
+					.expect("Conclude send timeout");
+			},
+			subsystem,
+		));
 	}
 
 	state
@@ -67,11 +71,8 @@ fn test_harness<T: Future<Output = VirtualOverseer>>(
 
 const TIMEOUT: Duration = Duration::from_millis(100);
 
-async fn overseer_send(
-	overseer: &mut VirtualOverseer,
-	msg: ApprovalDistributionMessage,
-) {
-	tracing::trace!(msg = ?msg, "Sending message");
+async fn overseer_send(overseer: &mut VirtualOverseer, msg: ApprovalDistributionMessage) {
+	gum::trace!(msg = ?msg, "Sending message");
 	overseer
 		.send(FromOverseer::Communication { msg })
 		.timeout(TIMEOUT)
@@ -79,14 +80,8 @@ async fn overseer_send(
 		.expect("msg send timeout");
 }
 
-async fn overseer_signal_block_finalized(
-	overseer: &mut VirtualOverseer,
-	number: BlockNumber,
-) {
-	tracing::trace!(
-		?number,
-		"Sending a finalized signal",
-	);
+async fn overseer_signal_block_finalized(overseer: &mut VirtualOverseer, number: BlockNumber) {
+	gum::trace!(?number, "Sending a finalized signal");
 	// we don't care about the block hash
 	overseer
 		.send(FromOverseer::Signal(OverseerSignal::BlockFinalized(Hash::zero(), number)))
@@ -95,17 +90,11 @@ async fn overseer_signal_block_finalized(
 		.expect("signal send timeout");
 }
 
-async fn overseer_recv(
-	overseer: &mut VirtualOverseer,
-) -> AllMessages {
-	tracing::trace!("Waiting for a message");
-	let msg = overseer
-		.recv()
-		.timeout(TIMEOUT)
-		.await
-		.expect("msg recv timeout");
+async fn overseer_recv(overseer: &mut VirtualOverseer) -> AllMessages {
+	gum::trace!("Waiting for a message");
+	let msg = overseer.recv().timeout(TIMEOUT).await.expect("msg recv timeout");
 
-	tracing::trace!(msg = ?msg, "Received message");
+	gum::trace!(msg = ?msg, "Received message");
 
 	msg
 }
@@ -117,16 +106,21 @@ async fn setup_peer_with_view(
 ) {
 	overseer_send(
 		virtual_overseer,
-		ApprovalDistributionMessage::NetworkBridgeUpdateV1(
-			NetworkBridgeEvent::PeerConnected(peer_id.clone(), ObservedRole::Full, None)
-		)
-	).await;
+		ApprovalDistributionMessage::NetworkBridgeUpdateV1(NetworkBridgeEvent::PeerConnected(
+			peer_id.clone(),
+			ObservedRole::Full,
+			None,
+		)),
+	)
+	.await;
 	overseer_send(
 		virtual_overseer,
-		ApprovalDistributionMessage::NetworkBridgeUpdateV1(
-			NetworkBridgeEvent::PeerViewChange(peer_id.clone(), view)
-		)
-	).await;
+		ApprovalDistributionMessage::NetworkBridgeUpdateV1(NetworkBridgeEvent::PeerViewChange(
+			peer_id.clone(),
+			view,
+		)),
+	)
+	.await;
 }
 
 async fn send_message_from_peer(
@@ -136,16 +130,15 @@ async fn send_message_from_peer(
 ) {
 	overseer_send(
 		virtual_overseer,
-		ApprovalDistributionMessage::NetworkBridgeUpdateV1(
-			NetworkBridgeEvent::PeerMessage(peer_id.clone(), msg)
-		)
-	).await;
+		ApprovalDistributionMessage::NetworkBridgeUpdateV1(NetworkBridgeEvent::PeerMessage(
+			peer_id.clone(),
+			msg,
+		)),
+	)
+	.await;
 }
 
-fn fake_assignment_cert(
-	block_hash: Hash,
-	validator: ValidatorIndex,
-) -> IndirectAssignmentCert {
+fn fake_assignment_cert(block_hash: Hash, validator: ValidatorIndex) -> IndirectAssignmentCert {
 	let ctx = schnorrkel::signing_context(RELAY_VRF_MODULO_CONTEXT);
 	let msg = b"WhenParachains?";
 	let mut prng = rand_core::OsRng;
@@ -157,11 +150,9 @@ fn fake_assignment_cert(
 		block_hash,
 		validator,
 		cert: AssignmentCert {
-			kind: AssignmentCertKind::RelayVRFModulo {
-				sample: 1,
-			},
+			kind: AssignmentCertKind::RelayVRFModulo { sample: 1 },
 			vrf: (VRFOutput(out), VRFProof(proof)),
-		}
+		},
 	}
 }
 
@@ -183,7 +174,6 @@ async fn expect_reputation_change(
 		}
 	);
 }
-
 
 /// import an assignment
 /// connect a new peer
@@ -263,13 +253,7 @@ fn try_import_the_same_assignment() {
 		expect_reputation_change(overseer, &peer_d, COST_UNEXPECTED_MESSAGE).await;
 		expect_reputation_change(overseer, &peer_d, BENEFIT_VALID_MESSAGE).await;
 
-		assert!(overseer
-			.recv()
-			.timeout(TIMEOUT)
-			.await
-			.is_none(),
-			"no message should be sent",
-		);
+		assert!(overseer.recv().timeout(TIMEOUT).await.is_none(), "no message should be sent");
 		virtual_overseer
 	});
 }
@@ -311,7 +295,8 @@ fn spam_attack_results_in_negative_reputation_change() {
 				let validator_index = ValidatorIndex(candidate_index as u32);
 				let cert = fake_assignment_cert(hash_b, validator_index);
 				(cert, candidate_index as u32)
-			}).collect();
+			})
+			.collect();
 
 		let msg = protocol_v1::ApprovalDistributionMessage::Assignments(assignments.clone());
 		send_message_from_peer(overseer, peer, msg.clone()).await;
@@ -338,10 +323,12 @@ fn spam_attack_results_in_negative_reputation_change() {
 		// send a view update that removes block B from peer's view by bumping the finalized_number
 		overseer_send(
 			overseer,
-			ApprovalDistributionMessage::NetworkBridgeUpdateV1(
-				NetworkBridgeEvent::PeerViewChange(peer.clone(), View::with_finalized(2))
-			)
-		).await;
+			ApprovalDistributionMessage::NetworkBridgeUpdateV1(NetworkBridgeEvent::PeerViewChange(
+				peer.clone(),
+				View::with_finalized(2),
+			)),
+		)
+		.await;
 
 		// send the assignments again
 		send_message_from_peer(overseer, peer, msg.clone()).await;
@@ -354,7 +341,6 @@ fn spam_attack_results_in_negative_reputation_change() {
 		virtual_overseer
 	});
 }
-
 
 /// Imagine we send a message to peer A and peer B.
 /// Upon receiving them, they both will try to send the message each other.
@@ -389,16 +375,19 @@ fn peer_sending_us_the_same_we_just_sent_them_is_ok() {
 		let cert = fake_assignment_cert(hash, validator_index);
 		overseer_send(
 			overseer,
-			ApprovalDistributionMessage::DistributeAssignment(cert.clone(), candidate_index)
-		).await;
+			ApprovalDistributionMessage::DistributeAssignment(cert.clone(), candidate_index),
+		)
+		.await;
 
 		// update peer view to include the hash
 		overseer_send(
 			overseer,
-			ApprovalDistributionMessage::NetworkBridgeUpdateV1(
-				NetworkBridgeEvent::PeerViewChange(peer.clone(), view![hash])
-			)
-		).await;
+			ApprovalDistributionMessage::NetworkBridgeUpdateV1(NetworkBridgeEvent::PeerViewChange(
+				peer.clone(),
+				view![hash],
+			)),
+		)
+		.await;
 
 		// we should send them the assignment
 		assert_matches!(
@@ -420,13 +409,7 @@ fn peer_sending_us_the_same_we_just_sent_them_is_ok() {
 		let msg = protocol_v1::ApprovalDistributionMessage::Assignments(assignments);
 		send_message_from_peer(overseer, peer, msg.clone()).await;
 
-		assert!(overseer
-			.recv()
-			.timeout(TIMEOUT)
-			.await
-			.is_none(),
-			"we should not punish the peer",
-		);
+		assert!(overseer.recv().timeout(TIMEOUT).await.is_none(), "we should not punish the peer");
 
 		// send the assignments again
 		send_message_from_peer(overseer, peer, msg).await;
@@ -469,8 +452,9 @@ fn import_approval_happy_path() {
 		let cert = fake_assignment_cert(hash, validator_index);
 		overseer_send(
 			overseer,
-			ApprovalDistributionMessage::DistributeAssignment(cert, candidate_index)
-		).await;
+			ApprovalDistributionMessage::DistributeAssignment(cert, candidate_index),
+		)
+		.await;
 
 		assert_matches!(
 			overseer_recv(overseer).await,
@@ -490,7 +474,7 @@ fn import_approval_happy_path() {
 			block_hash: hash,
 			candidate_index,
 			validator: validator_index,
-			signature: Default::default(),
+			signature: dummy_signature(),
 		};
 		let msg = protocol_v1::ApprovalDistributionMessage::Approvals(vec![approval.clone()]);
 		send_message_from_peer(overseer, &peer_b, msg).await;
@@ -557,7 +541,7 @@ fn import_approval_bad() {
 			block_hash: hash,
 			candidate_index,
 			validator: validator_index,
-			signature: Default::default(),
+			signature: dummy_signature(),
 		};
 		let msg = protocol_v1::ApprovalDistributionMessage::Approvals(vec![approval.clone()]);
 		send_message_from_peer(overseer, &peer_b, msg).await;
@@ -716,15 +700,9 @@ fn update_peer_view() {
 		let cert_a = fake_assignment_cert(hash_a, ValidatorIndex(0));
 		let cert_b = fake_assignment_cert(hash_b, ValidatorIndex(0));
 
-		overseer_send(
-			overseer,
-			ApprovalDistributionMessage::DistributeAssignment(cert_a, 0)
-		).await;
+		overseer_send(overseer, ApprovalDistributionMessage::DistributeAssignment(cert_a, 0)).await;
 
-		overseer_send(
-			overseer,
-			ApprovalDistributionMessage::DistributeAssignment(cert_b, 0)
-		).await;
+		overseer_send(overseer, ApprovalDistributionMessage::DistributeAssignment(cert_b, 0)).await;
 
 		// connect a peer
 		setup_peer_with_view(overseer, peer, view![hash_a]).await;
@@ -747,7 +725,8 @@ fn update_peer_view() {
 
 	assert_eq!(state.peer_views.get(peer).map(|v| v.finalized_number), Some(0));
 	assert_eq!(
-		state.blocks
+		state
+			.blocks
 			.get(&hash_a)
 			.unwrap()
 			.known_by
@@ -764,17 +743,20 @@ fn update_peer_view() {
 		// update peer's view
 		overseer_send(
 			overseer,
-			ApprovalDistributionMessage::NetworkBridgeUpdateV1(
-				NetworkBridgeEvent::PeerViewChange(peer.clone(), View::new(vec![hash_b, hash_c, hash_d], 2))
-			)
-		).await;
+			ApprovalDistributionMessage::NetworkBridgeUpdateV1(NetworkBridgeEvent::PeerViewChange(
+				peer.clone(),
+				View::new(vec![hash_b, hash_c, hash_d], 2),
+			)),
+		)
+		.await;
 
 		let cert_c = fake_assignment_cert(hash_c, ValidatorIndex(0));
 
 		overseer_send(
 			overseer,
-			ApprovalDistributionMessage::DistributeAssignment(cert_c.clone(), 0)
-		).await;
+			ApprovalDistributionMessage::DistributeAssignment(cert_c.clone(), 0),
+		)
+		.await;
 
 		// we should send relevant assignments to the peer
 		assert_matches!(
@@ -795,7 +777,8 @@ fn update_peer_view() {
 
 	assert_eq!(state.peer_views.get(peer).map(|v| v.finalized_number), Some(2));
 	assert_eq!(
-		state.blocks
+		state
+			.blocks
 			.get(&hash_c)
 			.unwrap()
 			.known_by
@@ -813,22 +796,17 @@ fn update_peer_view() {
 		// update peer's view
 		overseer_send(
 			overseer,
-			ApprovalDistributionMessage::NetworkBridgeUpdateV1(
-				NetworkBridgeEvent::PeerViewChange(peer.clone(), View::with_finalized(finalized_number))
-			)
-		).await;
+			ApprovalDistributionMessage::NetworkBridgeUpdateV1(NetworkBridgeEvent::PeerViewChange(
+				peer.clone(),
+				View::with_finalized(finalized_number),
+			)),
+		)
+		.await;
 		virtual_overseer
 	});
 
 	assert_eq!(state.peer_views.get(peer).map(|v| v.finalized_number), Some(finalized_number));
-	assert!(
-		state.blocks
-			.get(&hash_c)
-			.unwrap()
-			.known_by
-			.get(peer)
-			.is_none()
-	);
+	assert!(state.blocks.get(&hash_c).unwrap().known_by.get(peer).is_none());
 }
 
 /// E.g. if someone copies the keys...
@@ -882,23 +860,18 @@ fn import_remotely_then_locally() {
 		// import the same assignment locally
 		overseer_send(
 			overseer,
-			ApprovalDistributionMessage::DistributeAssignment(cert, candidate_index)
-		).await;
+			ApprovalDistributionMessage::DistributeAssignment(cert, candidate_index),
+		)
+		.await;
 
-		assert!(overseer
-			.recv()
-			.timeout(TIMEOUT)
-			.await
-			.is_none(),
-			"no message should be sent",
-		);
+		assert!(overseer.recv().timeout(TIMEOUT).await.is_none(), "no message should be sent");
 
 		// send the approval remotely
 		let approval = IndirectSignedApprovalVote {
 			block_hash: hash,
 			candidate_index,
 			validator: validator_index,
-			signature: Default::default(),
+			signature: dummy_signature(),
 		};
 		let msg = protocol_v1::ApprovalDistributionMessage::Approvals(vec![approval.clone()]);
 		send_message_from_peer(overseer, peer, msg).await;
@@ -916,18 +889,9 @@ fn import_remotely_then_locally() {
 		expect_reputation_change(overseer, peer, BENEFIT_VALID_MESSAGE_FIRST).await;
 
 		// import the same approval locally
-		overseer_send(
-			overseer,
-			ApprovalDistributionMessage::DistributeApproval(approval)
-		).await;
+		overseer_send(overseer, ApprovalDistributionMessage::DistributeApproval(approval)).await;
 
-		assert!(overseer
-			.recv()
-			.timeout(TIMEOUT)
-			.await
-			.is_none(),
-			"no message should be sent",
-		);
+		assert!(overseer.recv().timeout(TIMEOUT).await.is_none(), "no message should be sent");
 		virtual_overseer
 	});
 }
@@ -962,18 +926,17 @@ fn sends_assignments_even_when_state_is_approved() {
 			block_hash: hash,
 			candidate_index,
 			validator: validator_index,
-			signature: Default::default(),
+			signature: dummy_signature(),
 		};
 
 		overseer_send(
 			overseer,
-			ApprovalDistributionMessage::DistributeAssignment(cert.clone(), candidate_index)
-		).await;
+			ApprovalDistributionMessage::DistributeAssignment(cert.clone(), candidate_index),
+		)
+		.await;
 
-		overseer_send(
-			overseer,
-			ApprovalDistributionMessage::DistributeApproval(approval.clone()),
-		).await;
+		overseer_send(overseer, ApprovalDistributionMessage::DistributeApproval(approval.clone()))
+			.await;
 
 		// connect the peer.
 		setup_peer_with_view(overseer, peer, view![hash]).await;
@@ -1007,13 +970,85 @@ fn sends_assignments_even_when_state_is_approved() {
 			}
 		);
 
-		assert!(overseer
-			.recv()
-			.timeout(TIMEOUT)
-			.await
-			.is_none(),
-			"no message should be sent",
-		);
+		assert!(overseer.recv().timeout(TIMEOUT).await.is_none(), "no message should be sent");
+		virtual_overseer
+	});
+}
+
+/// <https://github.com/paritytech/polkadot/pull/5089>
+///
+/// 1. Receive remote peer view update with an unknown head
+/// 2. Receive assignments for that unknown head
+/// 3. Update our view and import the new block
+/// 4. Expect that no reputation with `COST_UNEXPECTED_MESSAGE` is applied
+#[test]
+fn race_condition_in_local_vs_remote_view_update() {
+	let parent_hash = Hash::repeat_byte(0xFF);
+	let peer_a = PeerId::random();
+	let hash_b = Hash::repeat_byte(0xBB);
+
+	let _ = test_harness(State::default(), |mut virtual_overseer| async move {
+		let overseer = &mut virtual_overseer;
+		let peer = &peer_a;
+
+		// Test a small number of candidates
+		let candidates_count = 1;
+		let meta = BlockApprovalMeta {
+			hash: hash_b.clone(),
+			parent_hash,
+			number: 2,
+			candidates: vec![Default::default(); candidates_count],
+			slot: 1.into(),
+		};
+
+		// This will send a peer view that is ahead of our view
+		setup_peer_with_view(overseer, peer, view![hash_b]).await;
+
+		// Send our view update to include a new head
+		overseer_send(
+			overseer,
+			ApprovalDistributionMessage::NetworkBridgeUpdateV1(NetworkBridgeEvent::OurViewChange(
+				our_view![hash_b],
+			)),
+		)
+		.await;
+
+		// send assignments related to `hash_b` but they will come to the MessagesPending
+		let assignments: Vec<_> = (0..candidates_count)
+			.map(|candidate_index| {
+				let validator_index = ValidatorIndex(candidate_index as u32);
+				let cert = fake_assignment_cert(hash_b, validator_index);
+				(cert, candidate_index as u32)
+			})
+			.collect();
+
+		let msg = protocol_v1::ApprovalDistributionMessage::Assignments(assignments.clone());
+		send_message_from_peer(overseer, peer, msg.clone()).await;
+
+		// This will handle pending messages being processed
+		let msg = ApprovalDistributionMessage::NewBlocks(vec![meta]);
+		overseer_send(overseer, msg).await;
+
+		for i in 0..candidates_count {
+			// Previously, this has caused out-of-view assignments/approvals
+			//expect_reputation_change(overseer, peer, COST_UNEXPECTED_MESSAGE).await;
+
+			assert_matches!(
+				overseer_recv(overseer).await,
+				AllMessages::ApprovalVoting(ApprovalVotingMessage::CheckAndImportAssignment(
+					assignment,
+					claimed_candidate_index,
+					tx,
+				)) => {
+					assert_eq!(assignment, assignments[i].0);
+					assert_eq!(claimed_candidate_index, assignments[i].1);
+					tx.send(AssignmentCheckResult::Accepted).unwrap();
+				}
+			);
+
+			// Since we have a valid statement pending, this should always occur
+			expect_reputation_change(overseer, peer, BENEFIT_VALID_MESSAGE_FIRST).await;
+		}
 		virtual_overseer
 	});
 }

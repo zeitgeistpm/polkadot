@@ -16,14 +16,14 @@
 
 pub mod generic;
 
-pub use generic::{Table, Context};
+pub use generic::{Context, Table};
 
-/// Concrete instantiations suitable for v1 primitives.
-pub mod v1 {
+/// Concrete instantiations suitable for v2 primitives.
+pub mod v2 {
 	use crate::generic;
-	use primitives::v1::{
-		CandidateHash, Id, CommittedCandidateReceipt, CompactStatement as PrimitiveStatement,
-		ValidatorSignature, ValidatorIndex,
+	use primitives::v2::{
+		CandidateHash, CommittedCandidateReceipt, CompactStatement as PrimitiveStatement, Id,
+		ValidatorIndex, ValidatorSignature,
 	};
 
 	/// Statements about candidates on the network.

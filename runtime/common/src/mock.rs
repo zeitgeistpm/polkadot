@@ -16,12 +16,15 @@
 
 //! Mocking utilities for testing.
 
-use std::{cell::RefCell, collections::HashMap};
-use parity_scale_codec::{Encode, Decode};
-use sp_runtime::traits::SaturatedConversion;
-use frame_support::dispatch::{DispatchError, DispatchResult};
-use primitives::v1::{HeadData, ValidationCode, Id as ParaId};
 use crate::traits::Registrar;
+use frame_support::{
+	dispatch::{DispatchError, DispatchResult},
+	weights::Weight,
+};
+use parity_scale_codec::{Decode, Encode};
+use primitives::v2::{HeadData, Id as ParaId, ValidationCode};
+use sp_runtime::{traits::SaturatedConversion, Permill};
+use std::{cell::RefCell, collections::HashMap};
 
 thread_local! {
 	static OPERATIONS: RefCell<Vec<(ParaId, u32, bool)>> = RefCell::new(Vec::new());
@@ -130,9 +133,13 @@ impl<T: frame_system::Config> Registrar for TestRegistrar<T> {
 				},
 			}
 		})?;
-		OPERATIONS.with(|x| x.borrow_mut().push(
-			(id, frame_system::Pallet::<T>::block_number().saturated_into(), true)
-		));
+		OPERATIONS.with(|x| {
+			x.borrow_mut().push((
+				id,
+				frame_system::Pallet::<T>::block_number().saturated_into(),
+				true,
+			))
+		});
 		Ok(())
 	}
 	fn make_parathread(id: ParaId) -> DispatchResult {
@@ -149,16 +156,21 @@ impl<T: frame_system::Config> Registrar for TestRegistrar<T> {
 		PARATHREADS.with(|x| {
 			let mut parathreads = x.borrow_mut();
 			match parathreads.binary_search(&id) {
-				Ok(_) => Err(DispatchError::Other("already parathread, so cannot `make_parathread`")),
+				Ok(_) =>
+					Err(DispatchError::Other("already parathread, so cannot `make_parathread`")),
 				Err(i) => {
 					parathreads.insert(i, id);
 					Ok(())
 				},
 			}
 		})?;
-		OPERATIONS.with(|x| x.borrow_mut().push(
-			(id, frame_system::Pallet::<T>::block_number().saturated_into(), false)
-		));
+		OPERATIONS.with(|x| {
+			x.borrow_mut().push((
+				id,
+				frame_system::Pallet::<T>::block_number().saturated_into(),
+				false,
+			))
+		});
 		Ok(())
 	}
 
@@ -179,7 +191,8 @@ impl<T: frame_system::Config> Registrar for TestRegistrar<T> {
 
 impl<T: frame_system::Config> TestRegistrar<T> {
 	pub fn operations() -> Vec<(ParaId, T::BlockNumber, bool)> {
-		OPERATIONS.with(|x| x.borrow().iter().map(|(p, b, c)| (*p, (*b).into(), *c)).collect::<Vec<_>>())
+		OPERATIONS
+			.with(|x| x.borrow().iter().map(|(p, b, c)| (*p, (*b).into(), *c)).collect::<Vec<_>>())
 	}
 
 	#[allow(dead_code)]
@@ -198,5 +211,23 @@ impl<T: frame_system::Config> TestRegistrar<T> {
 		PARACHAINS.with(|x| x.borrow_mut().clear());
 		PARATHREADS.with(|x| x.borrow_mut().clear());
 		MANAGERS.with(|x| x.borrow_mut().clear());
+	}
+}
+
+/// A very dumb implementation of `EstimateNextSessionRotation`. At the moment of writing, this
+/// is more to satisfy type requirements rather than to test anything.
+pub struct TestNextSessionRotation;
+
+impl frame_support::traits::EstimateNextSessionRotation<u32> for TestNextSessionRotation {
+	fn average_session_length() -> u32 {
+		10
+	}
+
+	fn estimate_current_session_progress(_now: u32) -> (Option<Permill>, Weight) {
+		(None, 0)
+	}
+
+	fn estimate_next_session_rotation(_now: u32) -> (Option<u32>, Weight) {
+		(None, 0)
 	}
 }

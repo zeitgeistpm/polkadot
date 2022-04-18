@@ -16,23 +16,22 @@
 
 //! Auxiliary `struct`/`enum`s for polkadot runtime.
 
-use frame_support::traits::{OnUnbalanced, Imbalance, Currency};
 use crate::NegativeImbalance;
+use frame_support::traits::{Currency, Imbalance, OnUnbalanced};
 
 /// Logic for the author to get a portion of fees.
 pub struct ToAuthor<R>(sp_std::marker::PhantomData<R>);
 impl<R> OnUnbalanced<NegativeImbalance<R>> for ToAuthor<R>
 where
 	R: pallet_balances::Config + pallet_authorship::Config,
-	<R as frame_system::Config>::AccountId: From<primitives::v1::AccountId>,
-	<R as frame_system::Config>::AccountId: Into<primitives::v1::AccountId>,
+	<R as frame_system::Config>::AccountId: From<primitives::v2::AccountId>,
+	<R as frame_system::Config>::AccountId: Into<primitives::v2::AccountId>,
 	<R as frame_system::Config>::Event: From<pallet_balances::Event<R>>,
 {
 	fn on_nonzero_unbalanced(amount: NegativeImbalance<R>) {
-		let numeric_amount = amount.peek();
-		let author = <pallet_authorship::Pallet<R>>::author();
-		<pallet_balances::Pallet<R>>::resolve_creating(&<pallet_authorship::Pallet<R>>::author(), amount);
-		<frame_system::Pallet<R>>::deposit_event(pallet_balances::Event::Deposit(author, numeric_amount));
+		if let Some(author) = <pallet_authorship::Pallet<R>>::author() {
+			<pallet_balances::Pallet<R>>::resolve_creating(&author, amount);
+		}
 	}
 }
 
@@ -41,11 +40,11 @@ impl<R> OnUnbalanced<NegativeImbalance<R>> for DealWithFees<R>
 where
 	R: pallet_balances::Config + pallet_treasury::Config + pallet_authorship::Config,
 	pallet_treasury::Pallet<R>: OnUnbalanced<NegativeImbalance<R>>,
-	<R as frame_system::Config>::AccountId: From<primitives::v1::AccountId>,
-	<R as frame_system::Config>::AccountId: Into<primitives::v1::AccountId>,
+	<R as frame_system::Config>::AccountId: From<primitives::v2::AccountId>,
+	<R as frame_system::Config>::AccountId: Into<primitives::v2::AccountId>,
 	<R as frame_system::Config>::Event: From<pallet_balances::Event<R>>,
 {
-	fn on_unbalanceds<B>(mut fees_then_tips: impl Iterator<Item=NegativeImbalance<R>>) {
+	fn on_unbalanceds<B>(mut fees_then_tips: impl Iterator<Item = NegativeImbalance<R>>) {
 		if let Some(fees) = fees_then_tips.next() {
 			// for fees, 80% to treasury, 20% to author
 			let mut split = fees.ration(80, 20);
@@ -60,23 +59,22 @@ where
 	}
 }
 
-
 #[cfg(test)]
 mod tests {
 	use super::*;
+	use frame_support::{parameter_types, traits::FindAuthor, weights::DispatchClass, PalletId};
 	use frame_system::limits;
-	use frame_support::{parameter_types, PalletId, weights::DispatchClass};
-	use frame_support::traits::FindAuthor;
+	use primitives::v2::AccountId;
 	use sp_core::H256;
 	use sp_runtime::{
 		testing::Header,
 		traits::{BlakeTwo256, IdentityLookup},
 		Perbill,
 	};
-	use primitives::v1::AccountId;
 
 	type UncheckedExtrinsic = frame_system::mocking::MockUncheckedExtrinsic<Test>;
 	type Block = frame_system::mocking::MockBlock<Test>;
+	const TEST_ACCOUNT: AccountId = AccountId::new([1; 32]);
 
 	frame_support::construct_runtime!(
 		pub enum Test where
@@ -107,7 +105,7 @@ mod tests {
 	}
 
 	impl frame_system::Config for Test {
-		type BaseCallFilter = frame_support::traits::AllowAll;
+		type BaseCallFilter = frame_support::traits::Everything;
 		type Origin = Origin;
 		type Index = u64;
 		type BlockNumber = u64;
@@ -130,6 +128,7 @@ mod tests {
 		type SystemWeightInfo = ();
 		type SS58Prefix = ();
 		type OnSetCode = ();
+		type MaxConsumers = frame_support::traits::ConstU32<16>;
 	}
 
 	impl pallet_balances::Config for Test {
@@ -157,6 +156,7 @@ mod tests {
 		type OnSlash = ();
 		type ProposalBond = ();
 		type ProposalBondMinimum = ();
+		type ProposalBondMaximum = ();
 		type SpendPeriod = ();
 		type Burn = ();
 		type BurnDestination = ();
@@ -169,9 +169,10 @@ mod tests {
 	pub struct OneAuthor;
 	impl FindAuthor<AccountId> for OneAuthor {
 		fn find_author<'a, I>(_: I) -> Option<AccountId>
-			where I: 'a,
+		where
+			I: 'a,
 		{
-			Some(Default::default())
+			Some(TEST_ACCOUNT)
 		}
 	}
 	impl pallet_authorship::Config for Test {
@@ -184,7 +185,9 @@ mod tests {
 	pub fn new_test_ext() -> sp_io::TestExternalities {
 		let mut t = frame_system::GenesisConfig::default().build_storage::<Test>().unwrap();
 		// We use default for brevity, but you can configure as desired if needed.
-		pallet_balances::GenesisConfig::<Test>::default().assimilate_storage(&mut t).unwrap();
+		pallet_balances::GenesisConfig::<Test>::default()
+			.assimilate_storage(&mut t)
+			.unwrap();
 		t.into()
 	}
 
@@ -195,12 +198,12 @@ mod tests {
 			let tip = Balances::issue(20);
 
 			assert_eq!(Balances::free_balance(Treasury::account_id()), 0);
-			assert_eq!(Balances::free_balance(AccountId::default()), 0);
+			assert_eq!(Balances::free_balance(TEST_ACCOUNT), 0);
 
 			DealWithFees::on_unbalanceds(vec![fee, tip].into_iter());
 
 			// Author gets 100% of tip and 20% of fee = 22
-			assert_eq!(Balances::free_balance(AccountId::default()), 22);
+			assert_eq!(Balances::free_balance(TEST_ACCOUNT), 22);
 			// Treasury gets 80% of fee
 			assert_eq!(Balances::free_balance(Treasury::account_id()), 8);
 		});

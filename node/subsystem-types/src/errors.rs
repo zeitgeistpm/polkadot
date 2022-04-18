@@ -16,26 +16,29 @@
 
 //! Error types for the subsystem requests.
 
-
 use crate::JaegerError;
 
 /// A description of an error causing the runtime API request to be unservable.
-#[derive(Debug, Clone)]
-pub struct RuntimeApiError(String);
+#[derive(thiserror::Error, Debug, Clone)]
+pub enum RuntimeApiError {
+	/// The runtime API cannot be executed due to a runtime error.
+	#[error("The runtime API '{runtime_api_name}' cannot be executed: {source}")]
+	Execution {
+		/// The runtime API being called
+		runtime_api_name: &'static str,
+		/// The wrapped error. Marked as source for tracking the error chain.
+		#[source]
+		source: std::sync::Arc<dyn 'static + std::error::Error + Send + Sync>,
+	},
 
-impl From<String> for RuntimeApiError {
-	fn from(s: String) -> Self {
-		RuntimeApiError(s)
-	}
+	/// The runtime API request in question cannot be executed because the runtime at the requested
+	/// relay-parent is an old version.
+	#[error("The API is not supported by the runtime at the relay-parent")]
+	NotSupported {
+		/// The runtime API being called
+		runtime_api_name: &'static str,
+	},
 }
-
-impl core::fmt::Display for RuntimeApiError {
-	fn fmt(&self, f: &mut core::fmt::Formatter) -> Result<(), core::fmt::Error> {
-		write!(f, "{}", self.0)
-	}
-}
-
-impl std::error::Error for RuntimeApiError {}
 
 /// A description of an error causing the chain API request to be unservable.
 #[derive(Debug, Clone)]
@@ -125,7 +128,8 @@ pub enum SubsystemError {
 		/// An additional annotation tag for the origin of `source`.
 		origin: &'static str,
 		/// The wrapped error. Marked as source for tracking the error chain.
-		#[source] source: Box<dyn 'static + std::error::Error + Send + Sync>
+		#[source]
+		source: Box<dyn 'static + std::error::Error + Send + Sync>,
 	},
 }
 
@@ -140,7 +144,10 @@ pub enum SubsystemError {
 
 impl SubsystemError {
 	/// Adds a `str` as `origin` to the given error `err`.
-	pub fn with_origin<E: 'static + Send + Sync + std::error::Error>(origin: &'static str, err: E) -> Self {
+	pub fn with_origin<E: 'static + Send + Sync + std::error::Error>(
+		origin: &'static str,
+		err: E,
+	) -> Self {
 		Self::FromOrigin { origin, source: Box::new(err) }
 	}
 }

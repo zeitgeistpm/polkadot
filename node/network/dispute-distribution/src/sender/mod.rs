@@ -14,20 +14,18 @@
 // You should have received a copy of the GNU General Public License
 // along with Polkadot.  If not, see <http://www.gnu.org/licenses/>.
 
-
-use std::collections::{HashMap, HashSet, hash_map::Entry};
+use std::collections::{hash_map::Entry, HashMap, HashSet};
 
 use futures::channel::{mpsc, oneshot};
 
 use polkadot_node_network_protocol::request_response::v1::DisputeRequest;
 use polkadot_node_primitives::{CandidateVotes, DisputeMessage, SignedDisputeStatement};
 use polkadot_node_subsystem_util::runtime::RuntimeInfo;
-use polkadot_primitives::v1::{CandidateHash, DisputeStatement, Hash, SessionIndex};
+use polkadot_primitives::v2::{CandidateHash, DisputeStatement, Hash, SessionIndex};
 use polkadot_subsystem::{
+	messages::{AllMessages, DisputeCoordinatorMessage},
 	ActiveLeavesUpdate, SubsystemContext,
-	messages::{AllMessages, DisputeCoordinatorMessage}
 };
-
 
 /// For each ongoing dispute we have a `SendTask` which takes care of it.
 ///
@@ -39,10 +37,10 @@ pub use send_task::TaskFinish;
 
 /// Error and [`Result`] type for sender
 mod error;
-pub use error::{Result, Error, Fatal, NonFatal};
+pub use error::{Error, FatalError, JfyiError, Result};
 
-use crate::{LOG_TARGET, Metrics};
-use self::error::NonFatalResult;
+use self::error::JfyiErrorResult;
+use crate::{Metrics, LOG_TARGET};
 
 /// The `DisputeSender` keeps track of all ongoing disputes we need to send statements out.
 ///
@@ -68,8 +66,7 @@ pub struct DisputeSender {
 	metrics: Metrics,
 }
 
-impl DisputeSender
-{
+impl DisputeSender {
 	/// Create a new `DisputeSender` which can be used to start dispute sendings.
 	pub fn new(tx: mpsc::Sender<TaskFinish>, metrics: Metrics) -> Self {
 		Self {
@@ -92,13 +89,9 @@ impl DisputeSender
 		let candidate_hash = req.0.candidate_receipt.hash();
 		match self.disputes.entry(candidate_hash) {
 			Entry::Occupied(_) => {
-				tracing::trace!(
-					target: LOG_TARGET,
-					?candidate_hash,
-					"Dispute sending already active."
-				);
+				gum::trace!(target: LOG_TARGET, ?candidate_hash, "Dispute sending already active.");
 				return Ok(())
-			}
+			},
 			Entry::Vacant(vacant) => {
 				let send_task = SendTask::new(
 					ctx,
@@ -106,10 +99,11 @@ impl DisputeSender
 					&self.active_sessions,
 					self.tx.clone(),
 					req,
+					&self.metrics,
 				)
 				.await?;
 				vacant.insert(send_task);
-			}
+			},
 		}
 		Ok(())
 	}
@@ -143,13 +137,14 @@ impl DisputeSender
 		let active_disputes: HashSet<_> = active_disputes.into_iter().map(|(_, c)| c).collect();
 
 		// Cleanup obsolete senders:
-		self.disputes.retain(
-			|candidate_hash, _| active_disputes.contains(candidate_hash)
-		);
+		self.disputes
+			.retain(|candidate_hash, _| active_disputes.contains(candidate_hash));
 
 		for dispute in self.disputes.values_mut() {
 			if have_new_sessions || dispute.has_failed_sends() {
-				dispute.refresh_sends(ctx, runtime, &self.active_sessions).await?;
+				dispute
+					.refresh_sends(ctx, runtime, &self.active_sessions, &self.metrics)
+					.await?;
 			}
 		}
 
@@ -162,7 +157,6 @@ impl DisputeSender
 
 	/// Receive message from a sending task.
 	pub async fn on_task_message(&mut self, msg: TaskFinish) {
-
 		let TaskFinish { candidate_hash, receiver, result } = msg;
 
 		self.metrics.on_sent_request(result.as_metrics_label());
@@ -170,13 +164,13 @@ impl DisputeSender
 		let task = match self.disputes.get_mut(&candidate_hash) {
 			None => {
 				// Can happen when a dispute ends, with messages still in queue:
-				tracing::trace!(
+				gum::trace!(
 					target: LOG_TARGET,
 					?result,
 					"Received `FromSendingTask::Finished` for non existing dispute."
 				);
 				return
-			}
+			},
 			Some(task) => task,
 		};
 		task.on_finished_send(&receiver, result);
@@ -192,68 +186,76 @@ impl DisputeSender
 		dispute: (SessionIndex, CandidateHash),
 	) -> Result<()> {
 		let (session_index, candidate_hash) = dispute;
-		// We need some relay chain head for context for receiving session info information:
-		let ref_head = self.active_sessions.values().next().ok_or(NonFatal::NoActiveHeads)?;
-		let info = runtime.get_session_info_by_index(ctx.sender(), *ref_head, session_index).await?;
+		// A relay chain head is required as context for receiving session info information from runtime and
+		// storage. We will iterate `active_sessions` to find a suitable head. We assume that there is at
+		// least one active head which, by `session_index`, is at least as recent as the `dispute` passed in.
+		// We need to avoid picking an older one from a session that might not yet exist in storage.
+		// Related to <https://github.com/paritytech/polkadot/issues/4730> .
+		let ref_head = self
+			.active_sessions
+			.iter()
+			.find_map(|(active_session_index, head_hash)| {
+				// There might be more than one session index that is at least as recent as the dispute
+				// so we just pick the first one. Keep in mind we are talking about the session index for the
+				// child of block identified by `head_hash` and not the session index for the block.
+				if active_session_index >= &session_index {
+					Some(head_hash)
+				} else {
+					None
+				}
+			})
+			.ok_or(JfyiError::NoActiveHeads)?;
+
+		let info = runtime
+			.get_session_info_by_index(ctx.sender(), *ref_head, session_index)
+			.await?;
 		let our_index = match info.validator_info.our_index {
 			None => {
-				tracing::trace!(
+				gum::trace!(
 					target: LOG_TARGET,
 					"Not a validator in that session - not starting dispute sending."
 				);
 				return Ok(())
-			}
+			},
 			Some(index) => index,
 		};
 
 		let votes = match get_candidate_votes(ctx, session_index, candidate_hash).await? {
 			None => {
-				tracing::debug!(
+				gum::debug!(
 					target: LOG_TARGET,
 					?session_index,
 					?candidate_hash,
 					"No votes for active dispute?! - possible, due to race."
 				);
 				return Ok(())
-			}
+			},
 			Some(votes) => votes,
 		};
 
-		let our_valid_vote = votes
-			.valid
-			.iter()
-			.find(|(_, i, _)| *i == our_index);
+		let our_valid_vote = votes.valid.iter().find(|(_, i, _)| *i == our_index);
 
-		let our_invalid_vote = votes
-			.invalid
-			.iter()
-			.find(|(_, i, _)| *i == our_index);
+		let our_invalid_vote = votes.invalid.iter().find(|(_, i, _)| *i == our_index);
 
-		let (valid_vote, invalid_vote) =
-			if let Some(our_valid_vote) = our_valid_vote {
-				// Get some invalid vote as well:
-				let invalid_vote = votes
-					.invalid
-					.get(0)
-					.ok_or(NonFatal::MissingVotesFromCoordinator)?;
-				(our_valid_vote, invalid_vote)
-			} else if let Some(our_invalid_vote) = our_invalid_vote {
-				// Get some valid vote as well:
-				let valid_vote = votes
-					.valid
-					.get(0)
-					.ok_or(NonFatal::MissingVotesFromCoordinator)?;
-				(valid_vote, our_invalid_vote)
-			} else {
-				return Err(From::from(NonFatal::MissingVotesFromCoordinator))
-			}
-		;
+		let (valid_vote, invalid_vote) = if let Some(our_valid_vote) = our_valid_vote {
+			// Get some invalid vote as well:
+			let invalid_vote =
+				votes.invalid.get(0).ok_or(JfyiError::MissingVotesFromCoordinator)?;
+			(our_valid_vote, invalid_vote)
+		} else if let Some(our_invalid_vote) = our_invalid_vote {
+			// Get some valid vote as well:
+			let valid_vote = votes.valid.get(0).ok_or(JfyiError::MissingVotesFromCoordinator)?;
+			(valid_vote, our_invalid_vote)
+		} else {
+			// There is no vote from us yet - nothing to do.
+			return Ok(())
+		};
 		let (kind, valid_index, signature) = valid_vote;
 		let valid_public = info
 			.session_info
 			.validators
 			.get(valid_index.0 as usize)
-			.ok_or(NonFatal::InvalidStatementFromCoordinator)?;
+			.ok_or(JfyiError::InvalidStatementFromCoordinator)?;
 		let valid_signed = SignedDisputeStatement::new_checked(
 			DisputeStatement::Valid(kind.clone()),
 			candidate_hash,
@@ -261,14 +263,14 @@ impl DisputeSender
 			valid_public.clone(),
 			signature.clone(),
 		)
-		.map_err(|()| NonFatal::InvalidStatementFromCoordinator)?;
+		.map_err(|()| JfyiError::InvalidStatementFromCoordinator)?;
 
 		let (kind, invalid_index, signature) = invalid_vote;
 		let invalid_public = info
 			.session_info
 			.validators
 			.get(invalid_index.0 as usize)
-			.ok_or(NonFatal::InvalidValidatorIndexFromCoordinator)?;
+			.ok_or(JfyiError::InvalidValidatorIndexFromCoordinator)?;
 		let invalid_signed = SignedDisputeStatement::new_checked(
 			DisputeStatement::Invalid(kind.clone()),
 			candidate_hash,
@@ -276,13 +278,13 @@ impl DisputeSender
 			invalid_public.clone(),
 			signature.clone(),
 		)
-		.map_err(|()| NonFatal::InvalidValidatorIndexFromCoordinator)?;
+		.map_err(|()| JfyiError::InvalidValidatorIndexFromCoordinator)?;
 
 		// Reconstructing the checked signed dispute statements is hardly useful here and wasteful,
 		// but I don't want to enable a bypass for the below smart constructor and this code path
 		// is supposed to be only hit on startup basically.
 		//
-		// Revisit this decision when the `from_signed_statements` is unneded for the normal code
+		// Revisit this decision when the `from_signed_statements` is unneeded for the normal code
 		// path as well.
 		let message = DisputeMessage::from_signed_statements(
 			valid_signed,
@@ -290,9 +292,9 @@ impl DisputeSender
 			invalid_signed,
 			*invalid_index,
 			votes.candidate_receipt,
-			&info.session_info
+			&info.session_info,
 		)
-		.map_err(NonFatal::InvalidDisputeFromCoordinator)?;
+		.map_err(JfyiError::InvalidDisputeFromCoordinator)?;
 
 		// Finally, get the party started:
 		self.start_sender(ctx, runtime, message).await
@@ -306,7 +308,7 @@ impl DisputeSender
 		ctx: &mut Context,
 		runtime: &mut RuntimeInfo,
 	) -> Result<bool> {
-		let new_sessions = get_active_session_indeces(ctx, runtime, &self.active_heads).await?;
+		let new_sessions = get_active_session_indices(ctx, runtime, &self.active_heads).await?;
 		let new_sessions_raw: HashSet<_> = new_sessions.keys().collect();
 		let old_sessions_raw: HashSet<_> = self.active_sessions.keys().collect();
 		let updated = new_sessions_raw != old_sessions_raw;
@@ -319,28 +321,30 @@ impl DisputeSender
 /// Retrieve the currently active sessions.
 ///
 /// List is all indices of all active sessions together with the head that was used for the query.
-async fn get_active_session_indeces<Context: SubsystemContext>(
+async fn get_active_session_indices<Context: SubsystemContext>(
 	ctx: &mut Context,
 	runtime: &mut RuntimeInfo,
 	active_heads: &Vec<Hash>,
 ) -> Result<HashMap<SessionIndex, Hash>> {
 	let mut indeces = HashMap::new();
+	// Iterate all heads we track as active and fetch the child' session indices.
 	for head in active_heads {
-		let session_index = runtime.get_session_index(ctx.sender(), *head).await?;
+		let session_index = runtime.get_session_index_for_child(ctx.sender(), *head).await?;
 		indeces.insert(session_index, *head);
 	}
 	Ok(indeces)
 }
 
 /// Retrieve Set of active disputes from the dispute coordinator.
-async fn get_active_disputes<Context: SubsystemContext>(ctx: &mut Context)
-	-> NonFatalResult<Vec<(SessionIndex, CandidateHash)>> {
+async fn get_active_disputes<Context: SubsystemContext>(
+	ctx: &mut Context,
+) -> JfyiErrorResult<Vec<(SessionIndex, CandidateHash)>> {
 	let (tx, rx) = oneshot::channel();
-	ctx.send_message(AllMessages::DisputeCoordinator(
-			DisputeCoordinatorMessage::ActiveDisputes(tx)
-	))
+	ctx.send_message(AllMessages::DisputeCoordinator(DisputeCoordinatorMessage::ActiveDisputes(
+		tx,
+	)))
 	.await;
-	rx.await.map_err(|_| NonFatal::AskActiveDisputesCanceled)
+	rx.await.map_err(|_| JfyiError::AskActiveDisputesCanceled)
 }
 
 /// Get all locally available dispute votes for a given dispute.
@@ -348,16 +352,13 @@ async fn get_candidate_votes<Context: SubsystemContext>(
 	ctx: &mut Context,
 	session_index: SessionIndex,
 	candidate_hash: CandidateHash,
-) -> NonFatalResult<Option<CandidateVotes>> {
+) -> JfyiErrorResult<Option<CandidateVotes>> {
 	let (tx, rx) = oneshot::channel();
 	ctx.send_message(AllMessages::DisputeCoordinator(
-		DisputeCoordinatorMessage::QueryCandidateVotes(
-			vec![(session_index, candidate_hash)],
-			tx
-		)
+		DisputeCoordinatorMessage::QueryCandidateVotes(vec![(session_index, candidate_hash)], tx),
 	))
 	.await;
 	rx.await
 		.map(|v| v.get(0).map(|inner| inner.to_owned().2))
-		.map_err(|_| NonFatal::AskCandidateVotesCanceled)
+		.map_err(|_| JfyiError::AskCandidateVotesCanceled)
 }

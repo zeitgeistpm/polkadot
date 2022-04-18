@@ -17,22 +17,26 @@
 
 //! Mock data and utility functions for unit tests in this subsystem.
 
-use std::{collections::HashMap, sync::Arc};
+use std::{
+	collections::{HashMap, HashSet},
+	sync::Arc,
+};
 
 use async_trait::async_trait;
 use lazy_static::lazy_static;
 
-use polkadot_node_network_protocol::{PeerId, authority_discovery::AuthorityDiscovery};
+use polkadot_node_network_protocol::{authority_discovery::AuthorityDiscovery, PeerId};
 use sc_keystore::LocalKeystore;
 use sp_application_crypto::AppKey;
-use sp_keyring::{Sr25519Keyring};
+use sp_keyring::Sr25519Keyring;
 use sp_keystore::{SyncCryptoStore, SyncCryptoStorePtr};
 
 use polkadot_node_primitives::{DisputeMessage, SignedDisputeStatement};
-use polkadot_primitives::v1::{
-	CandidateDescriptor, CandidateHash, CandidateReceipt, Hash,
-	SessionIndex, SessionInfo, ValidatorId, ValidatorIndex, AuthorityDiscoveryId,
+use polkadot_primitives::v2::{
+	AuthorityDiscoveryId, CandidateHash, CandidateReceipt, Hash, SessionIndex, SessionInfo,
+	ValidatorId, ValidatorIndex,
 };
+use polkadot_primitives_test_helpers::dummy_candidate_descriptor;
 
 pub const MOCK_SESSION_INDEX: SessionIndex = 1;
 pub const MOCK_NEXT_SESSION_INDEX: SessionIndex = 2;
@@ -45,14 +49,11 @@ pub const MOCK_VALIDATORS: [Sr25519Keyring; 6] = [
 	Sr25519Keyring::Eve,
 ];
 
-pub const MOCK_AUTHORITIES_NEXT_SESSION: [Sr25519Keyring;2] = [
-	Sr25519Keyring::One,
-	Sr25519Keyring::Two,
-];
+pub const MOCK_AUTHORITIES_NEXT_SESSION: [Sr25519Keyring; 2] =
+	[Sr25519Keyring::One, Sr25519Keyring::Two];
 
 pub const FERDIE_INDEX: ValidatorIndex = ValidatorIndex(0);
 pub const ALICE_INDEX: ValidatorIndex = ValidatorIndex(1);
-
 
 lazy_static! {
 
@@ -60,7 +61,7 @@ lazy_static! {
 pub static ref MOCK_AUTHORITY_DISCOVERY: MockAuthorityDiscovery = MockAuthorityDiscovery::new();
 // Creating an innocent looking `SessionInfo` is really expensive in a debug build. Around
 // 700ms on my machine, We therefore cache those keys here:
-pub static ref MOCK_VALIDATORS_DISCOVERY_KEYS: HashMap<Sr25519Keyring, AuthorityDiscoveryId> = 
+pub static ref MOCK_VALIDATORS_DISCOVERY_KEYS: HashMap<Sr25519Keyring, AuthorityDiscoveryId> =
 	MOCK_VALIDATORS
 	.iter()
 	.chain(MOCK_AUTHORITIES_NEXT_SESSION.iter())
@@ -77,7 +78,17 @@ pub static ref MOCK_SESSION_INFO: SessionInfo =
 			.iter()
 			.map(|k| MOCK_VALIDATORS_DISCOVERY_KEYS.get(&k).unwrap().clone())
 			.collect(),
-		..Default::default()
+		assignment_keys: vec![],
+		validator_groups: vec![],
+		n_cores: 0,
+		zeroth_delay_tranche_width: 0,
+		relay_vrf_modulo_samples: 0,
+		n_delay_tranches: 0,
+		no_show_slots: 0,
+		needed_approvals: 0,
+		active_validator_indices: vec![],
+		dispute_period: 6,
+		random_seed: [0u8; 32],
 	};
 
 /// `SessionInfo` for the second session. (No more validators, but two more authorities.
@@ -88,17 +99,24 @@ pub static ref MOCK_NEXT_SESSION_INFO: SessionInfo =
 				.iter()
 				.map(|k| MOCK_VALIDATORS_DISCOVERY_KEYS.get(&k).unwrap().clone())
 				.collect(),
-		..Default::default()
+		validators: vec![],
+		assignment_keys: vec![],
+		validator_groups: vec![],
+		n_cores: 0,
+		zeroth_delay_tranche_width: 0,
+		relay_vrf_modulo_samples: 0,
+		n_delay_tranches: 0,
+		no_show_slots: 0,
+		needed_approvals: 0,
+		active_validator_indices: vec![],
+		dispute_period: 6,
+		random_seed: [0u8; 32],
 	};
 }
 
-
 pub fn make_candidate_receipt(relay_parent: Hash) -> CandidateReceipt {
 	CandidateReceipt {
-		descriptor: CandidateDescriptor {
-			relay_parent,
-			..Default::default()
-		},
+		descriptor: dummy_candidate_descriptor(relay_parent),
 		commitments_hash: Hash::random(),
 	}
 }
@@ -106,15 +124,11 @@ pub fn make_candidate_receipt(relay_parent: Hash) -> CandidateReceipt {
 pub async fn make_explicit_signed(
 	validator: Sr25519Keyring,
 	candidate_hash: CandidateHash,
-	valid: bool
+	valid: bool,
 ) -> SignedDisputeStatement {
 	let keystore: SyncCryptoStorePtr = Arc::new(LocalKeystore::in_memory());
-	SyncCryptoStore::sr25519_generate_new(
-		&*keystore,
-		ValidatorId::ID,
-		Some(&validator.to_seed()),
-	)
-	.expect("Insert key into keystore");
+	SyncCryptoStore::sr25519_generate_new(&*keystore, ValidatorId::ID, Some(&validator.to_seed()))
+		.expect("Insert key into keystore");
 
 	SignedDisputeStatement::sign_explicit(
 		&keystore,
@@ -128,17 +142,18 @@ pub async fn make_explicit_signed(
 	.expect("Signing should work.")
 }
 
-
 pub async fn make_dispute_message(
 	candidate: CandidateReceipt,
 	valid_validator: ValidatorIndex,
 	invalid_validator: ValidatorIndex,
 ) -> DisputeMessage {
 	let candidate_hash = candidate.hash();
-	let valid_vote = 
-		make_explicit_signed(MOCK_VALIDATORS[valid_validator.0 as usize], candidate_hash, true).await;
+	let valid_vote =
+		make_explicit_signed(MOCK_VALIDATORS[valid_validator.0 as usize], candidate_hash, true)
+			.await;
 	let invalid_vote =
-		make_explicit_signed(MOCK_VALIDATORS[invalid_validator.0 as usize], candidate_hash, false).await;
+		make_explicit_signed(MOCK_VALIDATORS[invalid_validator.0 as usize], candidate_hash, false)
+			.await;
 	DisputeMessage::from_signed_statements(
 		valid_vote,
 		valid_validator,
@@ -153,7 +168,7 @@ pub async fn make_dispute_message(
 /// Dummy `AuthorityDiscovery` service.
 #[derive(Debug, Clone)]
 pub struct MockAuthorityDiscovery {
-	peer_ids: HashMap<Sr25519Keyring, PeerId>
+	peer_ids: HashMap<Sr25519Keyring, PeerId>,
 }
 
 impl MockAuthorityDiscovery {
@@ -178,18 +193,26 @@ impl MockAuthorityDiscovery {
 
 #[async_trait]
 impl AuthorityDiscovery for MockAuthorityDiscovery {
-	async fn get_addresses_by_authority_id(&mut self, _authority: polkadot_primitives::v1::AuthorityDiscoveryId)
-		-> Option<Vec<sc_network::Multiaddr>> {
-			panic!("Not implemented");
+	async fn get_addresses_by_authority_id(
+		&mut self,
+		_authority: polkadot_primitives::v2::AuthorityDiscoveryId,
+	) -> Option<HashSet<sc_network::Multiaddr>> {
+		panic!("Not implemented");
 	}
 
-	async fn get_authority_id_by_peer_id(&mut self, peer_id: polkadot_node_network_protocol::PeerId)
-		-> Option<polkadot_primitives::v1::AuthorityDiscoveryId> {
+	async fn get_authority_ids_by_peer_id(
+		&mut self,
+		peer_id: polkadot_node_network_protocol::PeerId,
+	) -> Option<HashSet<polkadot_primitives::v2::AuthorityDiscoveryId>> {
 		for (a, p) in self.peer_ids.iter() {
 			if p == &peer_id {
-				return Some(MOCK_VALIDATORS_DISCOVERY_KEYS.get(&a).unwrap().clone())
+				return Some(HashSet::from([MOCK_VALIDATORS_DISCOVERY_KEYS
+					.get(&a)
+					.unwrap()
+					.clone()]))
 			}
 		}
+
 		None
 	}
 }

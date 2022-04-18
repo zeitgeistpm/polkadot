@@ -15,27 +15,29 @@
 
 #[cfg(feature = "full-node")]
 use {
-	std::io,
-	std::path::PathBuf,
-	std::sync::Arc,
-
-	kvdb::KeyValueDB,
+	polkadot_node_subsystem_util::database::Database, std::io, std::path::PathBuf, std::sync::Arc,
 };
 
+#[cfg(feature = "full-node")]
 mod upgrade;
 
-#[cfg(any(test,feature = "full-node"))]
-mod columns {
-	pub const NUM_COLUMNS: u32 = 3;
-
+#[cfg(any(test, feature = "full-node"))]
+pub(crate) mod columns {
+	pub mod v0 {
+		pub const NUM_COLUMNS: u32 = 3;
+	}
+	pub const NUM_COLUMNS: u32 = 5;
 
 	pub const COL_AVAILABILITY_DATA: u32 = 0;
 	pub const COL_AVAILABILITY_META: u32 = 1;
 	pub const COL_APPROVAL_DATA: u32 = 2;
+	pub const COL_CHAIN_SELECTION_DATA: u32 = 3;
+	pub const COL_DISPUTE_COORDINATOR_DATA: u32 = 4;
+	pub const ORDERED_COL: &[u32] = &[COL_AVAILABILITY_META, COL_CHAIN_SELECTION_DATA];
 }
 
 /// Columns used by different subsystems.
-#[cfg(any(test,feature = "full-node"))]
+#[cfg(any(test, feature = "full-node"))]
 #[derive(Debug, Clone)]
 pub struct ColumnsConfig {
 	/// The column used by the av-store for data.
@@ -44,14 +46,20 @@ pub struct ColumnsConfig {
 	pub col_availability_meta: u32,
 	/// The column used by approval voting for data.
 	pub col_approval_data: u32,
+	/// The column used by chain selection for data.
+	pub col_chain_selection_data: u32,
+	/// The column used by dispute coordinator for data.
+	pub col_dispute_coordinator_data: u32,
 }
 
 /// The real columns used by the parachains DB.
-#[cfg(any(test,feature = "full-node"))]
+#[cfg(any(test, feature = "full-node"))]
 pub const REAL_COLUMNS: ColumnsConfig = ColumnsConfig {
 	col_availability_data: columns::COL_AVAILABILITY_DATA,
 	col_availability_meta: columns::COL_AVAILABILITY_META,
 	col_approval_data: columns::COL_APPROVAL_DATA,
+	col_chain_selection_data: columns::COL_CHAIN_SELECTION_DATA,
+	col_dispute_coordinator_data: columns::COL_DISPUTE_COORDINATOR_DATA,
 };
 
 /// The cache size for each column, in megabytes.
@@ -67,45 +75,74 @@ pub struct CacheSizes {
 
 impl Default for CacheSizes {
 	fn default() -> Self {
-		CacheSizes {
-			availability_data: 25,
-			availability_meta: 1,
-			approval_data: 5,
-		}
+		CacheSizes { availability_data: 25, availability_meta: 1, approval_data: 5 }
 	}
 }
 
 #[cfg(feature = "full-node")]
-fn other_io_error(err: String) -> io::Error {
+pub(crate) fn other_io_error(err: String) -> io::Error {
 	io::Error::new(io::ErrorKind::Other, err)
 }
 
 /// Open the database on disk, creating it if it doesn't exist.
 #[cfg(feature = "full-node")]
-pub fn open_creating(
+pub fn open_creating_rocksdb(
 	root: PathBuf,
 	cache_sizes: CacheSizes,
-) -> io::Result<Arc<dyn KeyValueDB>> {
-	use kvdb_rocksdb::{DatabaseConfig, Database};
+) -> io::Result<Arc<dyn Database>> {
+	use kvdb_rocksdb::{Database, DatabaseConfig};
 
 	let path = root.join("parachains").join("db");
 
 	let mut db_config = DatabaseConfig::with_columns(columns::NUM_COLUMNS);
 
-	let _ = db_config.memory_budget
+	let _ = db_config
+		.memory_budget
 		.insert(columns::COL_AVAILABILITY_DATA, cache_sizes.availability_data);
-	let _ = db_config.memory_budget
+	let _ = db_config
+		.memory_budget
 		.insert(columns::COL_AVAILABILITY_META, cache_sizes.availability_meta);
-	let _ = db_config.memory_budget
+	let _ = db_config
+		.memory_budget
 		.insert(columns::COL_APPROVAL_DATA, cache_sizes.approval_data);
 
-	let path_str = path.to_str().ok_or_else(|| other_io_error(
-		format!("Bad database path: {:?}", path),
-	))?;
+	let path_str = path
+		.to_str()
+		.ok_or_else(|| other_io_error(format!("Bad database path: {:?}", path)))?;
 
 	std::fs::create_dir_all(&path_str)?;
 	upgrade::try_upgrade_db(&path)?;
 	let db = Database::open(&db_config, &path_str)?;
+	let db =
+		polkadot_node_subsystem_util::database::kvdb_impl::DbAdapter::new(db, columns::ORDERED_COL);
 
+	Ok(Arc::new(db))
+}
+
+/// Open a parity db database.
+#[cfg(feature = "full-node")]
+pub fn open_creating_paritydb(
+	root: PathBuf,
+	_cache_sizes: CacheSizes,
+) -> io::Result<Arc<dyn Database>> {
+	let path = root.join("parachains");
+	let path_str = path
+		.to_str()
+		.ok_or_else(|| other_io_error(format!("Bad database path: {:?}", path)))?;
+
+	std::fs::create_dir_all(&path_str)?;
+
+	let mut options = parity_db::Options::with_columns(&path, columns::NUM_COLUMNS as u8);
+	for i in columns::ORDERED_COL {
+		options.columns[*i as usize].btree_index = true;
+	}
+
+	let db = parity_db::Db::open_or_create(&options)
+		.map_err(|err| io::Error::new(io::ErrorKind::Other, format!("{:?}", err)))?;
+
+	let db = polkadot_node_subsystem_util::database::paritydb_impl::DbAdapter::new(
+		db,
+		columns::ORDERED_COL,
+	);
 	Ok(Arc::new(db))
 }

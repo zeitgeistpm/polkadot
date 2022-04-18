@@ -1,15 +1,15 @@
 //! A dummy to be used with cargo expand
 
-use polkadot_overseer_gen::*;
 use polkadot_node_network_protocol::WrongVariant;
-
+use polkadot_overseer_gen::*;
+use std::collections::HashMap;
 
 /// Concrete subsystem implementation for `MsgStrukt` msg type.
 #[derive(Default)]
 pub struct AwesomeSubSys;
 
-impl ::polkadot_overseer_gen::Subsystem<XxxSubsystemContext<MsgStrukt>, Yikes> for  AwesomeSubSys {
-	fn start(self, _ctx: XxxSubsystemContext<MsgStrukt>) -> SpawnedSubsystem < Yikes > {
+impl ::polkadot_overseer_gen::Subsystem<XxxSubsystemContext<MsgStrukt>, Yikes> for AwesomeSubSys {
+	fn start(self, _ctx: XxxSubsystemContext<MsgStrukt>) -> SpawnedSubsystem<Yikes> {
 		unimplemented!("starting yay!")
 	}
 }
@@ -18,21 +18,18 @@ impl ::polkadot_overseer_gen::Subsystem<XxxSubsystemContext<MsgStrukt>, Yikes> f
 pub struct GoblinTower;
 
 impl ::polkadot_overseer_gen::Subsystem<XxxSubsystemContext<Plinko>, Yikes> for GoblinTower {
-	fn start(self, _ctx: XxxSubsystemContext<Plinko>) -> SpawnedSubsystem < Yikes > {
+	fn start(self, _ctx: XxxSubsystemContext<Plinko>) -> SpawnedSubsystem<Yikes> {
 		unimplemented!("welcum")
 	}
 }
-
 
 /// A signal sent by the overseer.
 #[derive(Debug, Clone)]
 pub struct SigSigSig;
 
-
 /// The external event.
 #[derive(Debug, Clone)]
 pub struct EvX;
-
 
 impl EvX {
 	pub fn focus<'a, T>(&'a self) -> Result<EvX, ()> {
@@ -75,7 +72,6 @@ impl From<NetworkMsg> for MsgStrukt {
 	}
 }
 
-
 #[derive(Debug, Clone, Copy)]
 pub enum NetworkMsg {
 	A,
@@ -83,20 +79,17 @@ pub enum NetworkMsg {
 	C,
 }
 
-
 impl NetworkMsg {
 	fn focus(&self) -> Result<Self, WrongVariant> {
 		Ok(match self {
 			Self::B => return Err(WrongVariant),
-			Self::A | Self::C => self.clone()
+			Self::A | Self::C => self.clone(),
 		})
 	}
 }
 
-
-
 #[overlord(signal=SigSigSig, event=EvX, error=Yikes, network=NetworkMsg, gen=AllMessages)]
-struct Xxx {
+struct Xxx<T> {
 	#[subsystem(MsgStrukt)]
 	sub0: AwesomeSubSys,
 
@@ -104,18 +97,30 @@ struct Xxx {
 	plinkos: GoblinTower,
 
 	i_like_pi: f64,
+	i_like_generic: T,
+	i_like_hash: HashMap<f64, f64>,
 }
 
 #[derive(Debug, Clone)]
 struct DummySpawner;
 
-impl SpawnNamed for DummySpawner{
-	fn spawn_blocking(&self, name: &'static str, _future: futures::future::BoxFuture<'static, ()>) {
-		unimplemented!("spawn blocking {}", name)
+impl SpawnNamed for DummySpawner {
+	fn spawn_blocking(
+		&self,
+		task_name: &'static str,
+		subsystem_name: Option<&'static str>,
+		_future: futures::future::BoxFuture<'static, ()>,
+	) {
+		unimplemented!("spawn blocking {} {}", task_name, subsystem_name.unwrap_or("default"))
 	}
 
-	fn spawn(&self, name: &'static str, _future: futures::future::BoxFuture<'static, ()>) {
-		unimplemented!("spawn {}", name)
+	fn spawn(
+		&self,
+		task_name: &'static str,
+		subsystem_name: Option<&'static str>,
+		_future: futures::future::BoxFuture<'static, ()>,
+	) {
+		unimplemented!("spawn {} {}", task_name, subsystem_name.unwrap_or("default"))
 	}
 }
 
@@ -123,12 +128,16 @@ impl SpawnNamed for DummySpawner{
 struct DummyCtx;
 
 fn main() {
-	let (overseer, _handler): (Xxx<_>, _) = Xxx::builder()
+	let (overseer, _handle): (Xxx<_, f64>, _) = Xxx::builder()
 		.sub0(AwesomeSubSys::default())
 		.plinkos(GoblinTower::default())
 		.i_like_pi(::std::f64::consts::PI)
+		.i_like_generic(42.0)
+		.i_like_hash(HashMap::new())
 		.spawner(DummySpawner)
 		.build()
 		.unwrap();
 	assert_eq!(overseer.i_like_pi.floor() as i8, 3);
+	assert_eq!(overseer.i_like_generic.floor() as i8, 42);
+	assert_eq!(overseer.i_like_hash.len() as i8, 0);
 }

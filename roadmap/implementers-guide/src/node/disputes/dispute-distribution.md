@@ -21,16 +21,16 @@ This design should result in a protocol that is:
 
 ### Output
 
-- [`DisputeCoordinatorMessage::ActiveDisputes`][DisputeParticipationMessage]
-- [`DisputeCoordinatorMessage::ImportStatements`][DisputeParticipationMessage]
-- [`DisputeCoordinatorMessage::QueryCandidateVotes`][DisputeParticipationMessage]
+- [`DisputeCoordinatorMessage::ActiveDisputes`][DisputeCoordinatorMessage]
+- [`DisputeCoordinatorMessage::ImportStatements`][DisputeCoordinatorMessage]
+- [`DisputeCoordinatorMessage::QueryCandidateVotes`][DisputeCoordinatorMessage]
 - [`RuntimeApiMessage`][RuntimeApiMessage]
 
 ### Wire format
 
 #### Disputes
 
-Protocol: "/polkadot/send\_dispute/1"
+Protocol: `"/polkadot/send_dispute/1"`
 
 Request:
 
@@ -86,7 +86,7 @@ enum DisputeResponse {
 
 #### Vote Recovery
 
-Protocol: "/polkadot/req\_votes/1"
+Protocol: `"/polkadot/req_votes/1"`
 
 ```rust
 struct IHaveVotesRequest {
@@ -246,7 +246,7 @@ even if they did:
 
 So this general rate limit, that we drop requests from same peers if they come
 faster than we can import the statements should not cause any problems for
-honest nodes and is in their favour.
+honest nodes and is in their favor.
 
 Size of `N`: The larger `N` the better we can handle distributed flood attacks
 (see previous paragraph), but we also get potentially more availability recovery
@@ -357,4 +357,3 @@ no real harm done: There was no serious attack to begin with.
 
 [DisputeDistributionMessage]: ../../types/overseer-protocol.md#dispute-distribution-message
 [RuntimeApiMessage]: ../../types/overseer-protocol.md#runtime-api-message
-[DisputeParticipationMessage]: ../../types/overseer-protocol.md#dispute-participation-message

@@ -52,11 +52,10 @@ pub(crate) fn impl_overseer_struct(info: &OverseerInfo) -> proc_macro2::TokenStr
 	let message_channel_capacity = info.message_channel_capacity;
 	let signal_channel_capacity = info.signal_channel_capacity;
 
-	let log_target = syn::LitStr::new(overseer_name.to_string().to_lowercase().as_str(), overseer_name.span());
+	let log_target =
+		syn::LitStr::new(overseer_name.to_string().to_lowercase().as_str(), overseer_name.span());
 
 	let ts = quote! {
-		const STOP_DELAY: ::std::time::Duration = ::std::time::Duration::from_secs(1);
-
 		/// Capacity of a bounded message channel between overseer and subsystem
 		/// but also for bounded channels between two subsystems.
 		const CHANNEL_CAPACITY: usize = #message_channel_capacity;
@@ -115,10 +114,9 @@ pub(crate) fn impl_overseer_struct(info: &OverseerInfo) -> proc_macro2::TokenStr
 
 				loop {
 					select! {
-						_ = self.running_subsystems.next() => {
-							if self.running_subsystems.is_empty() {
-								break;
-							}
+						_ = self.running_subsystems.next() =>
+						if self.running_subsystems.is_empty() {
+							break;
 						},
 						_ = timeout_fut => break,
 						complete => break,
@@ -186,9 +184,6 @@ pub(crate) fn impl_overseen_subsystem(info: &OverseerInfo) -> proc_macro2::Token
 	let support_crate = info.support_crate_name();
 
 	let ts = quote::quote! {
-
-		use #support_crate ::futures::SinkExt as _;
-
 		/// A subsystem that the overseer oversees.
 		///
 		/// Ties together the [`Subsystem`] itself and it's running instance
@@ -217,7 +212,7 @@ pub(crate) fn impl_overseen_subsystem(info: &OverseerInfo) -> proc_macro2::Token
 					}).timeout(MESSAGE_TIMEOUT).await
 					{
 						None => {
-							#support_crate ::tracing::error!(
+							#support_crate ::gum::error!(
 								target: LOG_TARGET,
 								%origin,
 								"Subsystem {} appears unresponsive.",

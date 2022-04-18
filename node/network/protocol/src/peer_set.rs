@@ -17,7 +17,10 @@
 //! All peersets and protocols used for parachains.
 
 use sc_network::config::{NonDefaultSetConfig, SetConfig};
-use std::{borrow::Cow, ops::{Index, IndexMut}};
+use std::{
+	borrow::Cow,
+	ops::{Index, IndexMut},
+};
 use strum::{EnumIter, IntoEnumIterator};
 
 /// The peer-sets and thus the protocols which are used for the network.
@@ -72,14 +75,14 @@ impl PeerSet {
 				max_notification_size,
 				set_config: SetConfig {
 					// Non-authority nodes don't need to accept incoming connections on this peer set:
-					in_peers: if is_authority == IsAuthority::Yes { 25 } else { 0 },
+					in_peers: if is_authority == IsAuthority::Yes { 100 } else { 0 },
 					out_peers: 0,
 					reserved_nodes: Vec::new(),
 					non_reserved_mode: if is_authority == IsAuthority::Yes {
 						sc_network::config::NonReservedPeerMode::Accept
 					} else {
 						sc_network::config::NonReservedPeerMode::Deny
-					}
+					},
 				},
 			},
 		}

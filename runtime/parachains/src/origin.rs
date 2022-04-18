@@ -16,16 +16,17 @@
 
 //! Declaration of the parachain specific origin and a pallet that hosts it.
 
-use sp_std::result;
+use primitives::v2::Id as ParaId;
 use sp_runtime::traits::BadOrigin;
-use primitives::v1::Id as ParaId;
+use sp_std::result;
 
 pub use pallet::*;
 
 /// Ensure that the origin `o` represents a parachain.
 /// Returns `Ok` with the parachain ID that effected the extrinsic or an `Err` otherwise.
 pub fn ensure_parachain<OuterOrigin>(o: OuterOrigin) -> result::Result<ParaId, BadOrigin>
-	where OuterOrigin: Into<result::Result<Origin, OuterOrigin>>
+where
+	OuterOrigin: Into<result::Result<Origin, OuterOrigin>>,
 {
 	match o.into() {
 		Ok(Origin::Parachain(id)) => Ok(id),
@@ -41,8 +42,8 @@ pub fn ensure_parachain<OuterOrigin>(o: OuterOrigin) -> result::Result<ParaId, B
 // ideally, though, the `construct_runtime` should support a free-standing origin.
 #[frame_support::pallet]
 pub mod pallet {
-	use frame_support::pallet_prelude::*;
 	use super::*;
+	use frame_support::pallet_prelude::*;
 
 	#[pallet::pallet]
 	#[pallet::generate_store(pub(super) trait Store)]
@@ -53,7 +54,7 @@ pub mod pallet {
 
 	/// Origin for the parachains.
 	#[pallet::origin]
-	#[derive(PartialEq, Eq, Clone, Encode, Decode, sp_core::RuntimeDebug)]
+	#[derive(PartialEq, Eq, Clone, Encode, Decode, sp_core::RuntimeDebug, scale_info::TypeInfo)]
 	pub enum Origin {
 		/// It comes from a parachain.
 		Parachain(ParaId),

@@ -15,9 +15,10 @@
 // along with Polkadot.  If not, see <http://www.gnu.org/licenses/>.
 
 use super::*;
-use futures::{pin_mut, executor::block_on};
-use polkadot_primitives::v1::{CandidateHash, OccupiedCore};
+use futures::{executor::block_on, pin_mut};
 use polkadot_node_subsystem::messages::AllMessages;
+use polkadot_primitives::v2::{CandidateHash, OccupiedCore};
+use test_helpers::dummy_candidate_descriptor;
 
 fn occupied_core(para_id: u32, candidate_hash: CandidateHash) -> CoreState {
 	CoreState::Occupied(OccupiedCore {
@@ -28,7 +29,7 @@ fn occupied_core(para_id: u32, candidate_hash: CandidateHash) -> CoreState {
 		next_up_on_time_out: None,
 		availability: Default::default(),
 		candidate_hash,
-		candidate_descriptor: Default::default(),
+		candidate_descriptor: dummy_candidate_descriptor(Hash::zero()),
 	})
 }
 
@@ -44,7 +45,8 @@ fn construct_availability_bitfield_works() {
 			&jaeger::Span::Disabled,
 			validator_index,
 			&mut sender,
-		).fuse();
+		)
+		.fuse();
 		pin_mut!(future);
 
 		let hash_a = CandidateHash(Hash::repeat_byte(1));

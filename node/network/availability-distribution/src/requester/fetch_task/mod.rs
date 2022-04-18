@@ -16,28 +16,33 @@
 
 use std::collections::HashSet;
 
-use futures::channel::mpsc;
-use futures::channel::oneshot;
-use futures::future::select;
-use futures::{FutureExt, SinkExt};
+use futures::{
+	channel::{mpsc, oneshot},
+	future::select,
+	FutureExt, SinkExt,
+};
 
 use polkadot_erasure_coding::branch_hash;
 use polkadot_node_network_protocol::request_response::{
-	request::{OutgoingRequest, RequestError, Requests, Recipient},
+	outgoing::{OutgoingRequest, Recipient, RequestError, Requests},
 	v1::{ChunkFetchingRequest, ChunkFetchingResponse},
 };
-use polkadot_primitives::v1::{AuthorityDiscoveryId, BlakeTwo256, CandidateHash, GroupIndex, Hash, HashT, OccupiedCore, SessionIndex};
 use polkadot_node_primitives::ErasureChunk;
-use polkadot_subsystem::messages::{
-	AllMessages, AvailabilityStoreMessage, NetworkBridgeMessage, IfDisconnected,
+use polkadot_primitives::v2::{
+	AuthorityDiscoveryId, BlakeTwo256, CandidateHash, GroupIndex, Hash, HashT, OccupiedCore,
+	SessionIndex,
 };
-use polkadot_subsystem::{SubsystemContext, jaeger};
+use polkadot_subsystem::{
+	jaeger,
+	messages::{AllMessages, AvailabilityStoreMessage, IfDisconnected, NetworkBridgeMessage},
+	SubsystemContext,
+};
 
 use crate::{
-	error::{Fatal, Result},
+	error::{FatalError, Result},
+	metrics::{Metrics, FAILED, SUCCEEDED},
 	requester::session_cache::{BadValidators, SessionInfo},
 	LOG_TARGET,
-	metrics::{Metrics, SUCCEEDED, FAILED},
 };
 
 #[cfg(test)]
@@ -59,7 +64,7 @@ pub struct FetchTask {
 	/// In other words, for which relay chain parents this candidate is considered live.
 	/// This is updated on every `ActiveLeavesUpdate` and enables us to know when we can safely
 	/// stop keeping track of that candidate/chunk.
-	live_in: HashSet<Hash>,
+	pub(crate) live_in: HashSet<Hash>,
 
 	/// We keep the task around in until `live_in` becomes empty, to make
 	/// sure we won't re-fetch an already fetched candidate.
@@ -98,7 +103,7 @@ struct RunningTask {
 
 	/// Index of validator group to fetch the chunk from.
 	///
-	/// Needef for reporting bad validators.
+	/// Needed for reporting bad validators.
 	group_index: GroupIndex,
 
 	/// Validators to request the chunk from.
@@ -140,10 +145,7 @@ impl FetchTaskConfig {
 
 		// Don't run tasks for our backing group:
 		if session_info.our_group == Some(core.group_responsible) {
-			return FetchTaskConfig {
-				live_in,
-				prepared_running: None,
-			};
+			return FetchTaskConfig { live_in, prepared_running: None }
 		}
 
 		let span = jaeger::Span::new(core.candidate_hash, "availability-distribution")
@@ -165,10 +167,7 @@ impl FetchTaskConfig {
 			sender,
 			span,
 		};
-		FetchTaskConfig {
-			live_in,
-			prepared_running: Some(prepared_running),
-		}
+		FetchTaskConfig { live_in, prepared_running: Some(prepared_running) }
 	}
 }
 
@@ -180,26 +179,17 @@ impl FetchTask {
 	where
 		Context: SubsystemContext,
 	{
-		let FetchTaskConfig {
-			prepared_running,
-			live_in,
-		} = config;
+		let FetchTaskConfig { prepared_running, live_in } = config;
 
 		if let Some(running) = prepared_running {
 			let (handle, kill) = oneshot::channel();
 
 			ctx.spawn("chunk-fetcher", running.run(kill).boxed())
-				.map_err(|e| Fatal::SpawnTask(e))?;
+				.map_err(|e| FatalError::SpawnTask(e))?;
 
-			Ok(FetchTask {
-				live_in,
-				state: FetchedState::Started(handle),
-			})
+			Ok(FetchTask { live_in, state: FetchedState::Started(handle) })
 		} else {
-			Ok(FetchTask {
-				live_in,
-				state: FetchedState::Canceled,
-			})
+			Ok(FetchTask { live_in, state: FetchedState::Canceled })
 		}
 	}
 
@@ -213,7 +203,9 @@ impl FetchTask {
 	/// Remove leaves and cancel the task, if it was the last one and the task has still been
 	/// fetching.
 	pub fn remove_leaves(&mut self, leaves: &HashSet<Hash>) {
-		self.live_in.difference(leaves);
+		for leaf in leaves {
+			self.live_in.remove(leaf);
+		}
 		if self.live_in.is_empty() && !self.is_finished() {
 			self.state = FetchedState::Canceled
 		}
@@ -261,7 +253,9 @@ impl RunningTask {
 		let mut bad_validators = Vec::new();
 		let mut succeeded = false;
 		let mut count: u32 = 0;
-		let mut _span = self.span.child("fetch-task")
+		let mut _span = self
+			.span
+			.child("fetch-task")
 			.with_chunk_index(self.request.index.0)
 			.with_relay_parent(self.relay_parent);
 		// Try validators in reverse order:
@@ -271,50 +265,53 @@ impl RunningTask {
 			if count > 0 {
 				self.metrics.on_retry();
 			}
-			count +=1;
+			count += 1;
 
 			// Send request:
 			let resp = match self.do_request(&validator).await {
 				Ok(resp) => resp,
 				Err(TaskError::ShuttingDown) => {
-					tracing::info!(
+					gum::info!(
 						target: LOG_TARGET,
 						"Node seems to be shutting down, canceling fetch task"
 					);
 					self.metrics.on_fetch(FAILED);
 					return
-				}
+				},
 				Err(TaskError::PeerError) => {
 					bad_validators.push(validator);
 					continue
-				}
+				},
 			};
 			let chunk = match resp {
-				ChunkFetchingResponse::Chunk(resp) => {
-					resp.recombine_into_chunk(&self.request)
-				}
+				ChunkFetchingResponse::Chunk(resp) => resp.recombine_into_chunk(&self.request),
 				ChunkFetchingResponse::NoSuchChunk => {
-					tracing::debug!(
+					gum::debug!(
 						target: LOG_TARGET,
 						validator = ?validator,
+						relay_parent = ?self.relay_parent,
+						group_index = ?self.group_index,
+						session_index = ?self.session_index,
+						chunk_index = ?self.request.index,
+						candidate_hash = ?self.request.candidate_hash,
 						"Validator did not have our chunk"
 					);
 					bad_validators.push(validator);
 					continue
-				}
+				},
 			};
 
 			// Data genuine?
 			if !self.validate_chunk(&validator, &chunk) {
 				bad_validators.push(validator);
-				continue;
+				continue
 			}
 
 			// Ok, let's store it and be happy:
 			self.store_chunk(chunk).await;
 			succeeded = true;
 			_span.add_string_tag("success", "true");
-			break;
+			break
 		}
 		_span.add_int_tag("tries", count as _);
 		if succeeded {
@@ -337,7 +334,7 @@ impl RunningTask {
 
 		self.sender
 			.send(FromFetchTask::Message(AllMessages::NetworkBridge(
-				NetworkBridgeMessage::SendRequests(vec![requests], IfDisconnected::TryConnect)
+				NetworkBridgeMessage::SendRequests(vec![requests], IfDisconnected::ImmediateError),
 			)))
 			.await
 			.map_err(|_| TaskError::ShuttingDown)?;
@@ -345,51 +342,68 @@ impl RunningTask {
 		match response_recv.await {
 			Ok(resp) => Ok(resp),
 			Err(RequestError::InvalidResponse(err)) => {
-				tracing::warn!(
+				gum::warn!(
 					target: LOG_TARGET,
 					origin= ?validator,
+					relay_parent = ?self.relay_parent,
+					group_index = ?self.group_index,
+					session_index = ?self.session_index,
+					chunk_index = ?self.request.index,
+					candidate_hash = ?self.request.candidate_hash,
 					err= ?err,
 					"Peer sent us invalid erasure chunk data"
 				);
 				Err(TaskError::PeerError)
-			}
+			},
 			Err(RequestError::NetworkError(err)) => {
-				tracing::warn!(
+				gum::debug!(
 					target: LOG_TARGET,
 					origin= ?validator,
+					relay_parent = ?self.relay_parent,
+					group_index = ?self.group_index,
+					session_index = ?self.session_index,
+					chunk_index = ?self.request.index,
+					candidate_hash = ?self.request.candidate_hash,
 					err= ?err,
 					"Some network error occurred when fetching erasure chunk"
 				);
 				Err(TaskError::PeerError)
-			}
+			},
 			Err(RequestError::Canceled(oneshot::Canceled)) => {
-				tracing::warn!(target: LOG_TARGET,
-							   origin= ?validator,
-							   "Erasure chunk request got canceled");
+				gum::debug!(
+					target: LOG_TARGET,
+					origin= ?validator,
+					relay_parent = ?self.relay_parent,
+					group_index = ?self.group_index,
+					session_index = ?self.session_index,
+					chunk_index = ?self.request.index,
+					candidate_hash = ?self.request.candidate_hash,
+					"Erasure chunk request got canceled"
+				);
 				Err(TaskError::PeerError)
-			}
+			},
 		}
 	}
 
 	fn validate_chunk(&self, validator: &AuthorityDiscoveryId, chunk: &ErasureChunk) -> bool {
 		let anticipated_hash =
-			match branch_hash(&self.erasure_root, &chunk.proof, chunk.index.0 as usize) {
+			match branch_hash(&self.erasure_root, chunk.proof(), chunk.index.0 as usize) {
 				Ok(hash) => hash,
 				Err(e) => {
-					tracing::warn!(
+					gum::warn!(
 						target: LOG_TARGET,
 						candidate_hash = ?self.request.candidate_hash,
 						origin = ?validator,
 						error = ?e,
 						"Failed to calculate chunk merkle proof",
 					);
-					return false;
-				}
+					return false
+				},
 			};
 		let erasure_chunk_hash = BlakeTwo256::hash(&chunk.chunk);
 		if anticipated_hash != erasure_chunk_hash {
-			tracing::warn!(target: LOG_TARGET, origin = ?validator,  "Received chunk does not match merkle tree");
-			return false;
+			gum::warn!(target: LOG_TARGET, origin = ?validator,  "Received chunk does not match merkle tree");
+			return false
 		}
 		true
 	}
@@ -408,11 +422,11 @@ impl RunningTask {
 			)))
 			.await;
 		if let Err(err) = r {
-			tracing::error!(target: LOG_TARGET, err= ?err, "Storing erasure chunk failed, system shutting down?");
+			gum::error!(target: LOG_TARGET, err= ?err, "Storing erasure chunk failed, system shutting down?");
 		}
 
 		if let Err(oneshot::Canceled) = rx.await {
-			tracing::error!(target: LOG_TARGET, "Storing erasure chunk failed");
+			gum::error!(target: LOG_TARGET, "Storing erasure chunk failed");
 		}
 	}
 
@@ -428,7 +442,7 @@ impl RunningTask {
 			})
 		};
 		if let Err(err) = self.sender.send(FromFetchTask::Concluded(payload)).await {
-			tracing::warn!(
+			gum::warn!(
 				target: LOG_TARGET,
 				err= ?err,
 				"Sending concluded message for task failed"
@@ -437,12 +451,9 @@ impl RunningTask {
 	}
 
 	async fn conclude_fail(&mut self) {
-		if let Err(err) = self.sender.send(FromFetchTask::Failed(self.request.candidate_hash)).await {
-			tracing::warn!(
-				target: LOG_TARGET,
-				?err,
-				"Sending `Failed` message for task failed"
-			);
+		if let Err(err) = self.sender.send(FromFetchTask::Failed(self.request.candidate_hash)).await
+		{
+			gum::warn!(target: LOG_TARGET, ?err, "Sending `Failed` message for task failed");
 		}
 	}
 }

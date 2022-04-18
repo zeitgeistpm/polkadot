@@ -19,13 +19,13 @@
 #![deny(unused_crate_dependencies)]
 #![warn(missing_docs)]
 
-use polkadot_primitives::v1::{Hash, BlockNumber};
-use parity_scale_codec::{Encode, Decode};
-use std::{fmt, collections::HashMap};
+use parity_scale_codec::{Decode, Encode};
+use polkadot_primitives::v2::{BlockNumber, Hash};
+use std::{collections::HashMap, fmt};
 
-pub use sc_network::{PeerId, IfDisconnected};
 #[doc(hidden)]
 pub use polkadot_node_jaeger as jaeger;
+pub use sc_network::{IfDisconnected, PeerId};
 #[doc(hidden)]
 pub use std::sync::Arc;
 
@@ -45,7 +45,6 @@ pub mod authority_discovery;
 pub type ProtocolVersion = u32;
 /// The minimum amount of peers to send gossip messages to.
 pub const MIN_GOSSIP_PEERS: usize = 25;
-
 
 /// An error indicating that this the over-arching message type had the wrong variant
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -117,9 +116,8 @@ macro_rules! impl_try_from {
 				}
 			}
 		}
-	}
+	};
 }
-
 
 /// Specialized wrapper around [`View`].
 ///
@@ -132,16 +130,13 @@ pub struct OurView {
 
 impl OurView {
 	/// Creates a new instance.
-	pub fn new(heads: impl IntoIterator<Item = (Hash, Arc<jaeger::Span>)>, finalized_number: BlockNumber) -> Self {
+	pub fn new(
+		heads: impl IntoIterator<Item = (Hash, Arc<jaeger::Span>)>,
+		finalized_number: BlockNumber,
+	) -> Self {
 		let state_per_head = heads.into_iter().collect::<HashMap<_, _>>();
-		let view = View::new(
-			state_per_head.keys().cloned(),
-			finalized_number,
-		);
-		Self {
-			view,
-			span_per_head: state_per_head,
-		}
+		let view = View::new(state_per_head.keys().cloned(), finalized_number);
+		Self { view, span_per_head: state_per_head }
 	}
 
 	/// Returns the span per head map.
@@ -174,7 +169,7 @@ impl std::ops::Deref for OurView {
 ///
 /// ```
 /// # use polkadot_node_network_protocol::our_view;
-/// # use polkadot_primitives::v1::Hash;
+/// # use polkadot_primitives::v2::Hash;
 /// let our_view = our_view![Hash::repeat_byte(1), Hash::repeat_byte(2)];
 /// ```
 #[macro_export]
@@ -208,7 +203,7 @@ pub struct View {
 ///
 /// ```
 /// # use polkadot_node_network_protocol::view;
-/// # use polkadot_primitives::v1::Hash;
+/// # use polkadot_primitives::v2::Hash;
 /// let view = view![Hash::repeat_byte(1), Hash::repeat_byte(2)];
 /// ```
 #[macro_export]
@@ -220,22 +215,15 @@ macro_rules! view {
 
 impl View {
 	/// Construct a new view based on heads and a finalized block number.
-	pub fn new(heads: impl IntoIterator<Item=Hash>, finalized_number: BlockNumber) -> Self
-	{
+	pub fn new(heads: impl IntoIterator<Item = Hash>, finalized_number: BlockNumber) -> Self {
 		let mut heads = heads.into_iter().collect::<Vec<Hash>>();
 		heads.sort();
-		Self {
-			heads,
-			finalized_number,
-		}
+		Self { heads, finalized_number }
 	}
 
 	/// Start with no heads, but only a finalized block number.
 	pub fn with_finalized(finalized_number: BlockNumber) -> Self {
-		Self {
-			heads: Vec::new(),
-			finalized_number,
-		}
+		Self { heads: Vec::new(), finalized_number }
 	}
 
 	/// Obtain the number of heads that are in view.
@@ -249,12 +237,12 @@ impl View {
 	}
 
 	/// Obtain an iterator over all heads.
-	pub fn iter<'a>(&'a self) -> impl Iterator<Item=&'a Hash> {
+	pub fn iter<'a>(&'a self) -> impl Iterator<Item = &'a Hash> {
 		self.heads.iter()
 	}
 
 	/// Obtain an iterator over all heads.
-	pub fn into_iter(self) -> impl Iterator<Item=Hash> {
+	pub fn into_iter(self) -> impl Iterator<Item = Hash> {
 		self.heads.into_iter()
 	}
 
@@ -293,13 +281,11 @@ impl View {
 
 /// v1 protocol types.
 pub mod v1 {
-	use parity_scale_codec::{Encode, Decode};
-	use std::convert::TryFrom;
+	use parity_scale_codec::{Decode, Encode};
 
-	use polkadot_primitives::v1::{
-		CandidateHash, CandidateIndex, CollatorId, CollatorSignature,
-		CompactStatement, Hash, Id as ParaId, UncheckedSignedAvailabilityBitfield,
-		ValidatorIndex, ValidatorSignature,
+	use polkadot_primitives::v2::{
+		CandidateHash, CandidateIndex, CollatorId, CollatorSignature, CompactStatement, Hash,
+		Id as ParaId, UncheckedSignedAvailabilityBitfield, ValidatorIndex, ValidatorSignature,
 	};
 
 	use polkadot_node_primitives::{
@@ -307,6 +293,7 @@ pub mod v1 {
 		UncheckedSignedFullStatement,
 	};
 
+	use crate::WrongVariant;
 
 	/// Network messages used by the bitfield distribution subsystem.
 	#[derive(Debug, Clone, Encode, Decode, PartialEq, Eq)]
@@ -344,26 +331,23 @@ pub mod v1 {
 	}
 
 	impl StatementDistributionMessage {
-		/// Get meta data of the given `StatementDistributionMessage`.
-		pub fn get_metadata(&self) -> StatementMetadata {
-			match self {
-				Self::Statement(relay_parent, statement) => StatementMetadata {
-					relay_parent: *relay_parent,
-					candidate_hash: statement.unchecked_payload().candidate_hash(),
-					signed_by: statement.unchecked_validator_index(),
-					signature: statement.unchecked_signature().clone(),
-				},
-				Self::LargeStatement(metadata) => metadata.clone(),
-			}
-		}
-
 		/// Get fingerprint describing the contained statement uniquely.
 		pub fn get_fingerprint(&self) -> (CompactStatement, ValidatorIndex) {
 			match self {
-				Self::Statement(_, statement) =>
-					(statement.unchecked_payload().to_compact(), statement.unchecked_validator_index()),
+				Self::Statement(_, statement) => (
+					statement.unchecked_payload().to_compact(),
+					statement.unchecked_validator_index(),
+				),
 				Self::LargeStatement(meta) =>
 					(CompactStatement::Seconded(meta.candidate_hash), meta.signed_by),
+			}
+		}
+
+		/// Get the signature from the statement.
+		pub fn get_signature(&self) -> ValidatorSignature {
+			match self {
+				Self::Statement(_, statement) => statement.unchecked_signature().clone(),
+				Self::LargeStatement(metadata) => metadata.signature.clone(),
 			}
 		}
 
@@ -398,6 +382,10 @@ pub mod v1 {
 		Approvals(Vec<IndirectSignedApprovalVote>),
 	}
 
+	/// Dummy network message type, so we will receive connect/disconnect events.
+	#[derive(Debug, Clone, PartialEq, Eq)]
+	pub enum GossipSuppportNetworkMessage {}
+
 	/// Network messages used by the collator protocol subsystem
 	#[derive(Debug, Clone, Encode, Decode, PartialEq, Eq)]
 	pub enum CollatorProtocolMessage {
@@ -431,6 +419,20 @@ pub mod v1 {
 	impl_try_from!(ValidationProtocol, BitfieldDistribution, BitfieldDistributionMessage);
 	impl_try_from!(ValidationProtocol, StatementDistribution, StatementDistributionMessage);
 	impl_try_from!(ValidationProtocol, ApprovalDistribution, ApprovalDistributionMessage);
+
+	impl TryFrom<ValidationProtocol> for GossipSuppportNetworkMessage {
+		type Error = WrongVariant;
+		fn try_from(_: ValidationProtocol) -> Result<Self, Self::Error> {
+			Err(WrongVariant)
+		}
+	}
+
+	impl<'a> TryFrom<&'a ValidationProtocol> for &'a GossipSuppportNetworkMessage {
+		type Error = WrongVariant;
+		fn try_from(_: &'a ValidationProtocol) -> Result<Self, Self::Error> {
+			Err(WrongVariant)
+		}
+	}
 
 	/// All network messages on the collation peer-set.
 	#[derive(Debug, Clone, Encode, Decode, PartialEq, Eq)]

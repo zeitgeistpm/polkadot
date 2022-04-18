@@ -22,24 +22,26 @@ use lru::LruCache;
 
 use parity_scale_codec::Encode;
 use sp_application_crypto::AppKey;
-use sp_core::crypto::Public;
+use sp_core::crypto::ByteArray;
 use sp_keystore::{CryptoStore, SyncCryptoStorePtr};
 
-use polkadot_primitives::v1::{CoreState, EncodeAs, GroupIndex, GroupRotationInfo, Hash, OccupiedCore, SessionIndex, SessionInfo, Signed, SigningContext, UncheckedSigned, ValidatorId, ValidatorIndex};
-use polkadot_node_subsystem::{SubsystemSender, SubsystemContext};
-
+use polkadot_node_subsystem::{SubsystemContext, SubsystemSender};
+use polkadot_primitives::v2::{
+	CandidateEvent, CoreState, EncodeAs, GroupIndex, GroupRotationInfo, Hash, OccupiedCore,
+	SessionIndex, SessionInfo, Signed, SigningContext, UncheckedSigned, ValidationCode,
+	ValidationCodeHash, ValidatorId, ValidatorIndex,
+};
 
 use crate::{
-	request_session_index_for_child, request_session_info,
-	request_availability_cores,
-	request_validator_groups,
+	request_availability_cores, request_candidate_events, request_session_index_for_child,
+	request_session_info, request_validation_code_by_hash, request_validator_groups,
 };
 
 /// Errors that can happen on runtime fetches.
 mod error;
 
 use error::{recv_runtime, Result};
-pub use error::{Error, NonFatal, Fatal};
+pub use error::{Error, FatalError, JfyiError};
 
 /// Configuration for construction a `RuntimeInfo`.
 pub struct Config {
@@ -100,10 +102,7 @@ impl Default for Config {
 impl RuntimeInfo {
 	/// Create a new `RuntimeInfo` for convenient runtime fetches.
 	pub fn new(keystore: Option<SyncCryptoStorePtr>) -> Self {
-		Self::new_with_config(Config {
-			keystore,
-			..Default::default()
-		})
+		Self::new_with_config(Config { keystore, ..Default::default() })
 	}
 
 	/// Create with more elaborate configuration options.
@@ -115,8 +114,9 @@ impl RuntimeInfo {
 		}
 	}
 
-	/// Retrieve the current session index.
-	pub async fn get_session_index<Sender>(
+	/// Returns the session index expected at any child of the `parent` block.
+	/// This does not return the session index for the `parent` block.
+	pub async fn get_session_index_for_child<Sender>(
 		&mut self,
 		sender: &mut Sender,
 		parent: Hash,
@@ -128,11 +128,10 @@ impl RuntimeInfo {
 			Some(index) => Ok(*index),
 			None => {
 				let index =
-					recv_runtime(request_session_index_for_child(parent, sender).await)
-						.await?;
+					recv_runtime(request_session_index_for_child(parent, sender).await).await?;
 				self.session_index_cache.put(parent, index);
 				Ok(index)
-			}
+			},
 		}
 	}
 
@@ -140,14 +139,14 @@ impl RuntimeInfo {
 	pub async fn get_session_info<'a, Sender>(
 		&'a mut self,
 		sender: &mut Sender,
-		parent: Hash,
+		relay_parent: Hash,
 	) -> Result<&'a ExtendedSessionInfo>
 	where
 		Sender: SubsystemSender,
 	{
-		let session_index = self.get_session_index(sender, parent).await?;
+		let session_index = self.get_session_index_for_child(sender, relay_parent).await?;
 
-		self.get_session_info_by_index(sender, parent, session_index).await
+		self.get_session_info_by_index(sender, relay_parent, session_index).await
 	}
 
 	/// Get `ExtendedSessionInfo` by session index.
@@ -167,54 +166,47 @@ impl RuntimeInfo {
 			let session_info =
 				recv_runtime(request_session_info(parent, session_index, sender).await)
 					.await?
-					.ok_or(NonFatal::NoSuchSession(session_index))?;
+					.ok_or(JfyiError::NoSuchSession(session_index))?;
 			let validator_info = self.get_validator_info(&session_info).await?;
 
-			let full_info = ExtendedSessionInfo {
-				session_info,
-				validator_info,
-			};
+			let full_info = ExtendedSessionInfo { session_info, validator_info };
 
 			self.session_info_cache.put(session_index, full_info);
 		}
-		Ok(
-			self.session_info_cache.get(&session_index)
-				.expect("We just put the value there. qed.")
-		)
+		Ok(self
+			.session_info_cache
+			.get(&session_index)
+			.expect("We just put the value there. qed."))
 	}
 
 	/// Convenience function for checking the signature of something signed.
 	pub async fn check_signature<Sender, Payload, RealPayload>(
 		&mut self,
 		sender: &mut Sender,
-		parent: Hash,
+		relay_parent: Hash,
 		signed: UncheckedSigned<Payload, RealPayload>,
-	) -> Result<std::result::Result<Signed<Payload, RealPayload>, UncheckedSigned<Payload, RealPayload>>>
+	) -> Result<
+		std::result::Result<Signed<Payload, RealPayload>, UncheckedSigned<Payload, RealPayload>>,
+	>
 	where
 		Sender: SubsystemSender,
 		Payload: EncodeAs<RealPayload> + Clone,
 		RealPayload: Encode + Clone,
 	{
-		let session_index = self.get_session_index(sender, parent).await?;
-		let info = self.get_session_info_by_index(sender, parent, session_index).await?;
-		Ok(check_signature(session_index, &info.session_info, parent, signed))
+		let session_index = self.get_session_index_for_child(sender, relay_parent).await?;
+		let info = self.get_session_info_by_index(sender, relay_parent, session_index).await?;
+		Ok(check_signature(session_index, &info.session_info, relay_parent, signed))
 	}
 
 	/// Build `ValidatorInfo` for the current session.
 	///
 	///
-	/// Returns: `None` if not a validator.
-	async fn get_validator_info(
-		&self,
-		session_info: &SessionInfo,
-	) -> Result<ValidatorInfo>
-	{
+	/// Returns: `None` if not a parachain validator.
+	async fn get_validator_info(&self, session_info: &SessionInfo) -> Result<ValidatorInfo> {
 		if let Some(our_index) = self.get_our_index(&session_info.validators).await {
 			// Get our group index:
-			let our_group = session_info.validator_groups
-				.iter()
-				.enumerate()
-				.find_map(|(i, g)| {
+			let our_group =
+				session_info.validator_groups.iter().enumerate().find_map(|(i, g)| {
 					g.iter().find_map(|v| {
 						if *v == our_index {
 							Some(GroupIndex(i as u32))
@@ -222,12 +214,8 @@ impl RuntimeInfo {
 							None
 						}
 					})
-				}
-			);
-			let info = ValidatorInfo {
-				our_index: Some(our_index),
-				our_group,
-			};
+				});
+			let info = ValidatorInfo { our_index: Some(our_index), our_group };
 			return Ok(info)
 		}
 		return Ok(ValidatorInfo { our_index: None, our_group: None })
@@ -239,10 +227,8 @@ impl RuntimeInfo {
 	async fn get_our_index(&self, validators: &[ValidatorId]) -> Option<ValidatorIndex> {
 		let keystore = self.keystore.as_ref()?;
 		for (i, v) in validators.iter().enumerate() {
-			if CryptoStore::has_keys(&**keystore, &[(v.to_raw_vec(), ValidatorId::ID)])
-				.await
-			{
-				return Some(ValidatorIndex(i as u32));
+			if CryptoStore::has_keys(&**keystore, &[(v.to_raw_vec(), ValidatorId::ID)]).await {
+				return Some(ValidatorIndex(i as u32))
 			}
 		}
 		None
@@ -260,22 +246,22 @@ where
 	Payload: EncodeAs<RealPayload> + Clone,
 	RealPayload: Encode + Clone,
 {
-	let signing_context = SigningContext {
-		session_index,
-		parent_hash: relay_parent,
-	};
+	let signing_context = SigningContext { session_index, parent_hash: relay_parent };
 
-	session_info.validators
+	session_info
+		.validators
 		.get(signed.unchecked_validator_index().0 as usize)
 		.ok_or_else(|| signed.clone())
 		.and_then(|v| signed.try_into_checked(&signing_context, v))
 }
 
 /// Request availability cores from the runtime.
-pub async fn get_availability_cores<Context>(ctx: &mut Context, relay_parent: Hash)
-	-> Result<Vec<CoreState>>
-	where
-		Context: SubsystemContext,
+pub async fn get_availability_cores<Context>(
+	ctx: &mut Context,
+	relay_parent: Hash,
+) -> Result<Vec<CoreState>>
+where
+	Context: SubsystemContext,
 {
 	recv_runtime(request_availability_cores(relay_parent, ctx.sender()).await).await
 }
@@ -299,18 +285,44 @@ where
 				None
 			}
 		})
-		.collect()
-	)
+		.collect())
 }
 
 /// Get group rotation info based on the given `relay_parent`.
-pub async fn get_group_rotation_info<Context>(ctx: &mut Context, relay_parent: Hash)
-	-> Result<GroupRotationInfo>
+pub async fn get_group_rotation_info<Context>(
+	ctx: &mut Context,
+	relay_parent: Hash,
+) -> Result<GroupRotationInfo>
 where
 	Context: SubsystemContext,
 {
 	// We drop `groups` here as we don't need them, because of `RuntimeInfo`. Ideally we would not
 	// fetch them in the first place.
-	let (_, info) = recv_runtime(request_validator_groups(relay_parent, ctx.sender()).await).await?;
+	let (_, info) =
+		recv_runtime(request_validator_groups(relay_parent, ctx.sender()).await).await?;
 	Ok(info)
+}
+
+/// Get `CandidateEvent`s for the given `relay_parent`.
+pub async fn get_candidate_events<Sender>(
+	sender: &mut Sender,
+	relay_parent: Hash,
+) -> Result<Vec<CandidateEvent>>
+where
+	Sender: SubsystemSender,
+{
+	recv_runtime(request_candidate_events(relay_parent, sender).await).await
+}
+
+/// Fetch `ValidationCode` by hash from the runtime.
+pub async fn get_validation_code_by_hash<Sender>(
+	sender: &mut Sender,
+	relay_parent: Hash,
+	validation_code_hash: ValidationCodeHash,
+) -> Result<Option<ValidationCode>>
+where
+	Sender: SubsystemSender,
+{
+	recv_runtime(request_validation_code_by_hash(relay_parent, validation_code_hash, sender).await)
+		.await
 }

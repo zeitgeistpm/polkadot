@@ -18,38 +18,29 @@
 //!   * Spawning subsystems and subsystem child jobs
 //!   * Establishing message passing
 
-use std::time::Duration;
-use futures::{
-	channel::oneshot,
-	pending, pin_mut, select, stream,
-	FutureExt, StreamExt,
-};
+use futures::{channel::oneshot, pending, pin_mut, select, stream, FutureExt, StreamExt};
 use futures_timer::Delay;
+use std::time::Duration;
 
-use polkadot_node_primitives::{PoV, BlockData};
-use polkadot_primitives::v1::Hash;
+use ::test_helpers::{dummy_candidate_descriptor, dummy_hash};
+use polkadot_node_primitives::{BlockData, PoV};
+use polkadot_node_subsystem_types::messages::{
+	CandidateBackingMessage, CandidateValidationMessage,
+};
 use polkadot_overseer::{
 	self as overseer,
-	AllMessages,
-	AllSubsystems,
-	HeadSupportsParachains,
-	Overseer,
-	OverseerSignal,
-	SubsystemError,
-	gen::{
-		FromOverseer,
-		SpawnedSubsystem,
-	},
+	dummy::dummy_overseer_builder,
+	gen::{FromOverseer, SpawnedSubsystem},
+	AllMessages, HeadSupportsParachains, OverseerSignal, SubsystemError,
 };
-use polkadot_node_subsystem_types::messages::{
-	CandidateValidationMessage, CandidateBackingMessage,
-};
+use polkadot_primitives::v2::{CandidateReceipt, Hash};
 
 struct AlwaysSupportsParachains;
 impl HeadSupportsParachains for AlwaysSupportsParachains {
-	fn head_supports_parachains(&self, _head: &Hash) -> bool { true }
+	fn head_supports_parachains(&self, _head: &Hash) -> bool {
+		true
+	}
 }
-
 
 ////////
 
@@ -58,43 +49,55 @@ struct Subsystem1;
 impl Subsystem1 {
 	async fn run<Ctx>(mut ctx: Ctx) -> ()
 	where
-		Ctx: overseer::SubsystemContext<Message=CandidateBackingMessage,AllMessages=AllMessages,Signal=OverseerSignal>,
+		Ctx: overseer::SubsystemContext<
+			Message = CandidateBackingMessage,
+			AllMessages = AllMessages,
+			Signal = OverseerSignal,
+		>,
 	{
 		'louy: loop {
 			match ctx.try_recv().await {
 				Ok(Some(msg)) => {
 					if let FromOverseer::Communication { msg } = msg {
-						tracing::info!("msg {:?}", msg);
+						gum::info!("msg {:?}", msg);
 					}
-					continue 'louy;
-				}
+					continue 'louy
+				},
 				Ok(None) => (),
 				Err(_) => {
-					tracing::info!("exiting");
-					break 'louy;
-				}
+					gum::info!("exiting");
+					break 'louy
+				},
 			}
 
 			Delay::new(Duration::from_secs(1)).await;
 			let (tx, _) = oneshot::channel();
 
+			let candidate_receipt = CandidateReceipt {
+				descriptor: dummy_candidate_descriptor(dummy_hash()),
+				commitments_hash: Hash::zero(),
+			};
+
 			let msg = CandidateValidationMessage::ValidateFromChainState(
+				candidate_receipt,
+				PoV { block_data: BlockData(Vec::new()) }.into(),
 				Default::default(),
-				PoV {
-					block_data: BlockData(Vec::new()),
-				}.into(),
 				tx,
 			);
-			ctx.send_message(<Ctx as overseer::SubsystemContext>::AllMessages::from(msg)).await;
+			ctx.send_message(<Ctx as overseer::SubsystemContext>::AllMessages::from(msg))
+				.await;
 		}
 		()
 	}
 }
 
-
-impl<Context> overseer::Subsystem<Context,SubsystemError> for Subsystem1
+impl<Context> overseer::Subsystem<Context, SubsystemError> for Subsystem1
 where
-	Context: overseer::SubsystemContext<Message=CandidateBackingMessage,AllMessages=AllMessages,Signal=OverseerSignal>,
+	Context: overseer::SubsystemContext<
+		Message = CandidateBackingMessage,
+		AllMessages = AllMessages,
+		Signal = OverseerSignal,
+	>,
 {
 	fn start(self, ctx: Context) -> SpawnedSubsystem<SubsystemError> {
 		let future = Box::pin(async move {
@@ -102,10 +105,7 @@ where
 			Ok(())
 		});
 
-		SpawnedSubsystem {
-			name: "subsystem-1",
-			future,
-		}
+		SpawnedSubsystem { name: "subsystem-1", future }
 	}
 }
 
@@ -116,37 +116,48 @@ struct Subsystem2;
 impl Subsystem2 {
 	async fn run<Ctx>(mut ctx: Ctx)
 	where
-		Ctx: overseer::SubsystemContext<Message=CandidateValidationMessage,AllMessages=AllMessages,Signal=OverseerSignal>,
+		Ctx: overseer::SubsystemContext<
+			Message = CandidateValidationMessage,
+			AllMessages = AllMessages,
+			Signal = OverseerSignal,
+		>,
 	{
 		ctx.spawn(
 			"subsystem-2-job",
 			Box::pin(async {
 				loop {
-					tracing::info!("Job tick");
+					gum::info!("Job tick");
 					Delay::new(Duration::from_secs(1)).await;
 				}
 			}),
-		).unwrap();
+		)
+		.unwrap();
 
 		loop {
 			match ctx.try_recv().await {
 				Ok(Some(msg)) => {
-					tracing::info!("Subsystem2 received message {:?}", msg);
-					continue;
-				}
-				Ok(None) => { pending!(); }
+					gum::info!("Subsystem2 received message {:?}", msg);
+					continue
+				},
+				Ok(None) => {
+					pending!();
+				},
 				Err(_) => {
-					tracing::info!("exiting");
-					return;
+					gum::info!("exiting");
+					return
 				},
 			}
 		}
 	}
 }
 
-impl<Context> overseer::Subsystem<Context,SubsystemError> for Subsystem2
+impl<Context> overseer::Subsystem<Context, SubsystemError> for Subsystem2
 where
-	Context: overseer::SubsystemContext<Message=CandidateValidationMessage,AllMessages=AllMessages,Signal=OverseerSignal>,
+	Context: overseer::SubsystemContext<
+		Message = CandidateValidationMessage,
+		AllMessages = AllMessages,
+		Signal = OverseerSignal,
+	>,
 {
 	fn start(self, ctx: Context) -> SpawnedSubsystem<SubsystemError> {
 		let future = Box::pin(async move {
@@ -154,10 +165,7 @@ where
 			Ok(())
 		});
 
-		SpawnedSubsystem {
-			name: "subsystem-2",
-			future,
-		}
+		SpawnedSubsystem { name: "subsystem-2", future }
 	}
 }
 
@@ -169,18 +177,13 @@ fn main() {
 			Delay::new(Duration::from_secs(1)).await;
 		});
 
-		let all_subsystems = AllSubsystems::<()>::dummy()
-			.replace_candidate_validation(Subsystem2)
-			.replace_candidate_backing(Subsystem1)
-			;
+		let (overseer, _handle) = dummy_overseer_builder(spawner, AlwaysSupportsParachains, None)
+			.unwrap()
+			.replace_candidate_validation(|_| Subsystem2)
+			.replace_candidate_backing(|orig| orig)
+			.build()
+			.unwrap();
 
-		let (overseer, _handler) = Overseer::new(
-			vec![],
-			all_subsystems,
-			None,
-			AlwaysSupportsParachains,
-			spawner,
-		).unwrap();
 		let overseer_fut = overseer.run().fuse();
 		let timer_stream = timer_stream;
 
@@ -191,7 +194,7 @@ fn main() {
 			select! {
 				_ = overseer_fut => break,
 				_ = timer_stream.next() => {
-					tracing::info!("tick");
+					gum::info!("tick");
 				}
 				complete => break,
 			}
