@@ -30,7 +30,7 @@ assert_matches = "1.4.0"
 sp-core = { git = "https://github.com/paritytech/substrate", features = ["std"] , branch = "polkadot-v0.9.16" }
 sp-keyring = { git = "https://github.com/paritytech/substrate", branch = "polkadot-v0.9.16" }
 sc-network = { git = "https://github.com/paritytech/substrate", branch = "polkadot-v0.9.16" }
-parity-scale-codec = { version = "2.3.1", features = ["std"]  }
+parity-scale-codec = { version = "3.1.2", features = ["std"]  }
 
 polkadot-subsystem-testhelpers = { package = "polkadot-node-subsystem-test-helpers", path = "../../subsystem-test-helpers" }
 polkadot-primitives-test-helpers = { path = "../../../primitives/test-helpers" }
