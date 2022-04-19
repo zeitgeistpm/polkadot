@@ -20,7 +20,7 @@
 use sp_std::vec::Vec;
 
 use frame_support::weights::Weight;
-use parity_scale_codec::{CompactAs, Decode, Encode};
+use parity_scale_codec::{CompactAs, Decode, Encode, MaxEncodedLen};
 use scale_info::TypeInfo;
 use sp_core::{RuntimeDebug, TypeId};
 use sp_runtime::traits::Hash as _;
@@ -53,7 +53,7 @@ pub use polkadot_core_primitives::BlockNumber as RelayChainBlockNumber;
 	TypeInfo,
 	Default,
 )]
-#[cfg_attr(feature = "std", derive(Serialize, Deserialize, Hash, MallocSizeOf))]
+#[cfg_attr(feature = "std", derive(Serialize, Deserialize, Hash, MallocSizeOf, Default))]
 pub struct HeadData(#[cfg_attr(feature = "std", serde(with = "bytes"))] pub Vec<u8>);
 
 impl HeadData {
@@ -64,9 +64,7 @@ impl HeadData {
 }
 
 /// Parachain validation code.
-#[derive(
-	Default, PartialEq, Eq, Clone, Encode, Decode, RuntimeDebug, derive_more::From, TypeInfo,
-)]
+#[derive(PartialEq, Eq, Clone, Encode, Decode, RuntimeDebug, derive_more::From, TypeInfo)]
 #[cfg_attr(feature = "std", derive(Serialize, Deserialize, Hash, MallocSizeOf))]
 pub struct ValidationCode(#[cfg_attr(feature = "std", serde(with = "bytes"))] pub Vec<u8>);
 
@@ -82,7 +80,7 @@ impl ValidationCode {
 /// This type is produced by [`ValidationCode::hash`].
 ///
 /// This type makes it easy to enforce that a hash is a validation code hash on the type level.
-#[derive(Clone, Copy, Encode, Decode, Default, Hash, Eq, PartialEq, PartialOrd, Ord, TypeInfo)]
+#[derive(Clone, Copy, Encode, Decode, Hash, Eq, PartialEq, PartialOrd, Ord, TypeInfo)]
 #[cfg_attr(feature = "std", derive(MallocSizeOf))]
 pub struct ValidationCodeHash(Hash);
 
@@ -125,8 +123,8 @@ impl sp_std::fmt::LowerHex for ValidationCodeHash {
 /// Parachain block data.
 ///
 /// Contains everything required to validate para-block, may contain block and witness data.
-#[derive(PartialEq, Eq, Clone, Encode, Decode, derive_more::From, TypeInfo)]
-#[cfg_attr(feature = "std", derive(Serialize, Deserialize, Debug, MallocSizeOf))]
+#[derive(PartialEq, Eq, Clone, Encode, Decode, derive_more::From, TypeInfo, RuntimeDebug)]
+#[cfg_attr(feature = "std", derive(Serialize, Deserialize, MallocSizeOf))]
 pub struct BlockData(#[cfg_attr(feature = "std", serde(with = "bytes"))] pub Vec<u8>);
 
 /// Unique identifier of a parachain.
@@ -139,6 +137,7 @@ pub struct BlockData(#[cfg_attr(feature = "std", serde(with = "bytes"))] pub Vec
 	Encode,
 	Eq,
 	Hash,
+	MaxEncodedLen,
 	Ord,
 	PartialEq,
 	PartialOrd,

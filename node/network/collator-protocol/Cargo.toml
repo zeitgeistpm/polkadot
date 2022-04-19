@@ -1,20 +1,20 @@
 [package]
 name = "polkadot-collator-protocol"
-version = "0.9.14"
+version = "0.9.16"
 authors = ["Parity Technologies <admin@parity.io>"]
 edition = "2018"
 
 [dependencies]
 always-assert = "0.1.2"
-derive_more = "0.99.14"
-futures = "0.3.17"
+derive_more = "0.99.17"
+futures = "0.3.19"
 futures-timer = "3"
 thiserror = "1.0.30"
 tracing = "0.1.29"
 
-sp-core = { git = "https://github.com/paritytech/substrate", branch = "polkadot-v0.9.14" }
-sp-runtime = { git = "https://github.com/paritytech/substrate", branch = "polkadot-v0.9.14" }
-sp-keystore = { git = "https://github.com/paritytech/substrate", branch = "polkadot-v0.9.14" }
+sp-core = { git = "https://github.com/paritytech/substrate", branch = "polkadot-v0.9.16" }
+sp-runtime = { git = "https://github.com/paritytech/substrate", branch = "polkadot-v0.9.16" }
+sp-keystore = { git = "https://github.com/paritytech/substrate", branch = "polkadot-v0.9.16" }
 
 polkadot-primitives = { path = "../../../primitives" }
 polkadot-node-network-protocol = { path = "../../network/protocol" }
@@ -27,9 +27,10 @@ log = "0.4.13"
 env_logger = "0.9.0"
 assert_matches = "1.4.0"
 
-sp-core = { git = "https://github.com/paritytech/substrate", features = ["std"] , branch = "polkadot-v0.9.14" }
-sp-keyring = { git = "https://github.com/paritytech/substrate", branch = "polkadot-v0.9.14" }
-sc-network = { git = "https://github.com/paritytech/substrate", branch = "polkadot-v0.9.14" }
+sp-core = { git = "https://github.com/paritytech/substrate", features = ["std"] , branch = "polkadot-v0.9.16" }
+sp-keyring = { git = "https://github.com/paritytech/substrate", branch = "polkadot-v0.9.16" }
+sc-network = { git = "https://github.com/paritytech/substrate", branch = "polkadot-v0.9.16" }
 parity-scale-codec = { version = "2.3.1", features = ["std"]  }
 
 polkadot-subsystem-testhelpers = { package = "polkadot-node-subsystem-test-helpers", path = "../../subsystem-test-helpers" }
+polkadot-primitives-test-helpers = { path = "../../../primitives/test-helpers" }
