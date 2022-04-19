@@ -71,7 +71,10 @@ use futures::{channel::oneshot, future::BoxFuture, select, Future, FutureExt, St
 use lru::LruCache;
 
 use client::{BlockImportNotification, BlockchainEvents, FinalityNotification};
-use polkadot_primitives::v1::{Block, BlockId, BlockNumber, Hash, ParachainHost};
+use polkadot_primitives::{
+	v1::{Block, BlockId, BlockNumber, Hash},
+	v2::ParachainHost,
+};
 use sp_api::{ApiExt, ProvideRuntimeApi};
 
 use polkadot_node_network_protocol::v1 as protocol_v1;
@@ -80,8 +83,8 @@ use polkadot_node_subsystem_types::messages::{
 	AvailabilityRecoveryMessage, AvailabilityStoreMessage, BitfieldDistributionMessage,
 	BitfieldSigningMessage, CandidateBackingMessage, CandidateValidationMessage, ChainApiMessage,
 	ChainSelectionMessage, CollationGenerationMessage, CollatorProtocolMessage,
-	DisputeCoordinatorMessage, DisputeDistributionMessage, DisputeParticipationMessage,
-	GossipSupportMessage, NetworkBridgeEvent, NetworkBridgeMessage, ProvisionerMessage,
+	DisputeCoordinatorMessage, DisputeDistributionMessage, GossipSupportMessage,
+	NetworkBridgeEvent, NetworkBridgeMessage, ProvisionerMessage, PvfCheckerMessage,
 	RuntimeApiMessage, StatementDistributionMessage,
 };
 pub use polkadot_node_subsystem_types::{
@@ -130,7 +133,13 @@ where
 {
 	fn head_supports_parachains(&self, head: &Hash) -> bool {
 		let id = BlockId::Hash(*head);
-		self.runtime_api().has_api::<dyn ParachainHost<Block>>(&id).unwrap_or(false)
+		// Check that the `ParachainHost` runtime api is at least with version 1 present on chain.
+		self.runtime_api()
+			.api_version::<dyn ParachainHost<Block>>(&id)
+			.ok()
+			.flatten()
+			.unwrap_or(0) >=
+			1
 	}
 }
 
@@ -411,6 +420,9 @@ pub struct Overseer<SupportsParachains> {
 	#[subsystem(no_dispatch, CandidateValidationMessage)]
 	candidate_validation: CandidateValidation,
 
+	#[subsystem(no_dispatch, PvfCheckerMessage)]
+	pvf_checker: PvfChecker,
+
 	#[subsystem(no_dispatch, CandidateBackingMessage)]
 	candidate_backing: CandidateBacking,
 
@@ -461,9 +473,6 @@ pub struct Overseer<SupportsParachains> {
 
 	#[subsystem(no_dispatch, DisputeCoordinatorMessage)]
 	dispute_coordinator: DisputeCoordinator,
-
-	#[subsystem(no_dispatch, DisputeParticipationMessage)]
-	dispute_participation: DisputeParticipation,
 
 	#[subsystem(no_dispatch, DisputeDistributionMessage)]
 	dispute_distribution: DisputeDistribution,
