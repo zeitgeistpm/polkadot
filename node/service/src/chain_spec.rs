@@ -38,6 +38,7 @@ use rococo_runtime as rococo;
 use rococo_runtime_constants::currency::UNITS as ROC;
 use sc_chain_spec::{ChainSpecExtension, ChainType};
 use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
 use sp_core::{sr25519, Pair, Public};
 use sp_runtime::{traits::IdentifyAccount, Perbill};
 use telemetry::TelemetryEndpoints;
@@ -1018,9 +1019,9 @@ pub fn rococo_staging_testnet_config() -> Result<RococoChainSpec, String> {
 			TelemetryEndpoints::new(vec![(ROCOCO_STAGING_TELEMETRY_URL.to_string(), 0)])
 				.expect("Rococo Staging telemetry url is valid; qed"),
 		),
-		Some(DEFAULT_PROTOCOL_ID),
+		Some(ROCOCO_BATTERY_STATION_RELAY_PROTOCOL_ID),
 		None,
-		None,
+		Some(rococo_battery_station_relay_token_properties()),
 		Default::default(),
 	))
 }
@@ -1820,7 +1821,7 @@ pub fn versi_local_testnet_config() -> Result<RococoChainSpec, String> {
 
 fn rococo_battery_station_relay_token_properties() -> Map<String, Value> {
 	let mut properties = Map::new();
-	let _ = properties.insert("tokenSymbol".into(), "ZBS".into());
+	let _ = properties.insert("tokenSymbol".into(), "RZBS".into());
 	let _ = properties.insert("tokenDecimals".into(), 10.into());
 	properties
 }

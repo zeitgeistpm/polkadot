@@ -53,7 +53,7 @@ pub use polkadot_core_primitives::BlockNumber as RelayChainBlockNumber;
 	TypeInfo,
 	Default,
 )]
-#[cfg_attr(feature = "std", derive(Serialize, Deserialize, Hash, MallocSizeOf, Default))]
+#[cfg_attr(feature = "std", derive(Serialize, Deserialize, Hash, MallocSizeOf))]
 pub struct HeadData(#[cfg_attr(feature = "std", serde(with = "bytes"))] pub Vec<u8>);
 
 impl HeadData {
