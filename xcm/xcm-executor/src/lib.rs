@@ -16,7 +16,11 @@
 
 #![cfg_attr(not(feature = "std"), no_std)]
 
-use frame_support::{dispatch::Dispatchable, ensure, weights::GetDispatchInfo};
+use frame_support::{
+	dispatch::Weight,
+	ensure,
+	weights::GetDispatchInfo,
+};
 use sp_runtime::traits::Saturating;
 use sp_std::{marker::PhantomData, prelude::*};
 use xcm::latest::{
@@ -27,8 +31,8 @@ use xcm::latest::{
 
 pub mod traits;
 use traits::{
-	ClaimAssets, ConvertOrigin, DropAssets, FilterAssetLocation, InvertLocation, OnResponse,
-	ShouldExecute, TransactAsset, VersionChangeNotifier, WeightBounds, WeightTrader,
+	CallDispatcher, ClaimAssets, ConvertOrigin, DropAssets, FilterAssetLocation, InvertLocation,
+	OnResponse, ShouldExecute, TransactAsset, VersionChangeNotifier, WeightBounds, WeightTrader,
 };
 
 mod assets;
@@ -340,15 +344,16 @@ impl<Config: config::Config> XcmExecutor<Config> {
 					.map_err(|_| XcmError::BadOrigin)?;
 				let weight = message_call.get_dispatch_info().weight;
 				ensure!(weight.ref_time() <= require_weight_at_most, XcmError::MaxWeightInvalid);
-				let actual_weight = match message_call.dispatch(dispatch_origin) {
-					Ok(post_info) => post_info.actual_weight,
-					Err(error_and_info) => {
-						// Not much to do with the result as it is. It's up to the parachain to ensure that the
-						// message makes sense.
-						error_and_info.post_info.actual_weight
-					},
-				}
-				.unwrap_or(weight);
+				let actual_weight =
+					match Config::CallDispatcher::dispatch(message_call, dispatch_origin) {
+						Ok(post_info) => post_info.actual_weight,
+						Err(error_and_info) => {
+							// Not much to do with the result as it is. It's up to the parachain to ensure that the
+							// message makes sense.
+							error_and_info.post_info.actual_weight
+						},
+					}
+					.unwrap_or(weight);
 				let surplus = weight.saturating_sub(actual_weight);
 				// We assume that the `Config::Weigher` will counts the `require_weight_at_most`
 				// for the estimate of how much weight this instruction will take. Now that we know
