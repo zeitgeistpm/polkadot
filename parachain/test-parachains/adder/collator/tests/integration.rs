@@ -1,4 +1,4 @@
-// Copyright 2020 Parity Technologies (UK) Ltd.
+// Copyright (C) Parity Technologies (UK) Ltd.
 // This file is part of Polkadot.
 
 // Polkadot is free software: you can redistribute it and/or modify
@@ -20,9 +20,10 @@
 const PUPPET_EXE: &str = env!("CARGO_BIN_EXE_adder_collator_puppet_worker");
 
 // If this test is failing, make sure to run all tests with the `real-overseer` feature being enabled.
-#[substrate_test_utils::test]
+
+#[substrate_test_utils::test(flavor = "multi_thread")]
 async fn collating_using_adder_collator() {
-	use polkadot_primitives::v2::Id as ParaId;
+	use polkadot_primitives::Id as ParaId;
 	use sp_keyring::AccountKeyring::*;
 
 	let mut builder = sc_cli::LoggerBuilder::new("");

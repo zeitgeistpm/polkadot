@@ -1,4 +1,4 @@
-// Copyright 2021 Parity Technologies (UK) Ltd.
+// Copyright (C) Parity Technologies (UK) Ltd.
 // This file is part of Polkadot.
 
 // Polkadot is free software: you can redistribute it and/or modify
@@ -22,27 +22,24 @@ use crate::{
 		new_test_ext, Configuration, MockGenesisConfig, ParaInclusion, Paras, ParasShared, System,
 		Test,
 	},
-	paras::ParaGenesisArgs,
+	paras::{ParaGenesisArgs, ParaKind},
 	paras_inherent::DisputedBitfield,
 	scheduler::AssignmentKind,
 };
-use assert_matches::assert_matches;
+use primitives::{SignedAvailabilityBitfields, UncheckedSignedAvailabilityBitfields};
+
 use frame_support::assert_noop;
-use futures::executor::block_on;
 use keyring::Sr25519Keyring;
-use primitives::v2::{
+use parity_scale_codec::DecodeAll;
+use primitives::{
 	BlockNumber, CandidateCommitments, CandidateDescriptor, CollatorId,
 	CompactStatement as Statement, Hash, SignedAvailabilityBitfield, SignedStatement,
-	UncheckedSignedAvailabilityBitfield, ValidationCode, ValidatorId, ValidityAttestation,
-	PARACHAIN_KEY_TYPE_ID,
+	ValidationCode, ValidatorId, ValidityAttestation, PARACHAIN_KEY_TYPE_ID,
 };
 use sc_keystore::LocalKeystore;
-use sp_keystore::{SyncCryptoStore, SyncCryptoStorePtr};
+use sp_keystore::{Keystore, KeystorePtr};
 use std::sync::Arc;
-use test_helpers::{
-	dummy_candidate_receipt, dummy_collator, dummy_collator_signature, dummy_hash,
-	dummy_validation_code,
-};
+use test_helpers::{dummy_collator, dummy_collator_signature, dummy_validation_code};
 
 fn default_config() -> HostConfiguration<BlockNumber> {
 	let mut config = HostConfiguration::default();
@@ -51,18 +48,18 @@ fn default_config() -> HostConfiguration<BlockNumber> {
 	config
 }
 
-pub(crate) fn genesis_config(paras: Vec<(ParaId, bool)>) -> MockGenesisConfig {
+pub(crate) fn genesis_config(paras: Vec<(ParaId, ParaKind)>) -> MockGenesisConfig {
 	MockGenesisConfig {
 		paras: paras::GenesisConfig {
 			paras: paras
 				.into_iter()
-				.map(|(id, is_chain)| {
+				.map(|(id, para_kind)| {
 					(
 						id,
 						ParaGenesisArgs {
 							genesis_head: Vec::new().into(),
 							validation_code: dummy_validation_code(),
-							parachain: is_chain,
+							para_kind,
 						},
 					)
 				})
@@ -91,7 +88,7 @@ pub(crate) fn collator_sign_candidate(
 ) {
 	candidate.descriptor.collator = collator.public().into();
 
-	let payload = primitives::v2::collator_signature_payload(
+	let payload = primitives::collator_signature_payload(
 		&candidate.descriptor.relay_parent,
 		&candidate.descriptor.para_id,
 		&candidate.descriptor.persisted_validation_data_hash,
@@ -103,11 +100,11 @@ pub(crate) fn collator_sign_candidate(
 	assert!(candidate.descriptor().check_collator_signature().is_ok());
 }
 
-pub(crate) async fn back_candidate(
+pub(crate) fn back_candidate(
 	candidate: CommittedCandidateReceipt,
 	validators: &[Sr25519Keyring],
 	group: &[ValidatorIndex],
-	keystore: &SyncCryptoStorePtr,
+	keystore: &KeystorePtr,
 	signing_context: &SigningContext,
 	kind: BackingKind,
 ) -> BackedCandidate {
@@ -134,7 +131,6 @@ pub(crate) async fn back_candidate(
 			*val_idx,
 			&key.public().into(),
 		)
-		.await
 		.unwrap()
 		.unwrap()
 		.signature()
@@ -146,7 +142,7 @@ pub(crate) async fn back_candidate(
 	let backed = BackedCandidate { candidate, validity_votes, validator_indices };
 
 	let successfully_backed =
-		primitives::v2::check_candidate_backing(&backed, signing_context, group.len(), |i| {
+		primitives::check_candidate_backing(&backed, signing_context, group.len(), |i| {
 			Some(validators[group[i].0 as usize].public().into())
 		})
 		.ok()
@@ -159,6 +155,17 @@ pub(crate) async fn back_candidate(
 	};
 
 	backed
+}
+
+pub(crate) fn run_to_block_default_notifications(to: BlockNumber, new_session: Vec<BlockNumber>) {
+	run_to_block(to, |b| {
+		new_session.contains(&b).then_some(SessionChangeNotification {
+			prev_config: Configuration::config(),
+			new_config: Configuration::config(),
+			session_index: ParasShared::session_index() + 1,
+			..Default::default()
+		})
+	});
 }
 
 pub(crate) fn run_to_block(
@@ -179,8 +186,8 @@ pub(crate) fn run_to_block(
 				&notification.new_config,
 				notification.validators.clone(),
 			);
-			Paras::initializer_on_new_session(&notification);
-			ParaInclusion::initializer_on_new_session(&notification);
+			let outgoing = Paras::initializer_on_new_session(&notification);
+			ParaInclusion::initializer_on_new_session(&notification, &outgoing);
 		}
 
 		System::on_finalize(b);
@@ -222,8 +229,8 @@ pub(crate) fn validator_pubkeys(val_ids: &[Sr25519Keyring]) -> Vec<ValidatorId> 
 	val_ids.iter().map(|v| v.public().into()).collect()
 }
 
-pub(crate) async fn sign_bitfield(
-	keystore: &SyncCryptoStorePtr,
+pub(crate) fn sign_bitfield(
+	keystore: &KeystorePtr,
 	key: &Sr25519Keyring,
 	validator_index: ValidatorIndex,
 	bitfield: AvailabilityBitfield,
@@ -236,7 +243,6 @@ pub(crate) async fn sign_bitfield(
 		validator_index,
 		&key.public().into(),
 	)
-	.await
 	.unwrap()
 	.unwrap()
 }
@@ -304,13 +310,52 @@ pub(crate) fn make_vdata_hash(para_id: ParaId) -> Option<Hash> {
 	Some(persisted_validation_data.hash())
 }
 
+/// Wrapper around `sanitize_bitfields` with less parameters.
+fn simple_sanitize_bitfields(
+	unchecked_bitfields: UncheckedSignedAvailabilityBitfields,
+	disputed_bitfield: DisputedBitfield,
+	expected_bits: usize,
+) -> SignedAvailabilityBitfields {
+	let parent_hash = frame_system::Pallet::<Test>::parent_hash();
+	let session_index = shared::Pallet::<Test>::session_index();
+	let validators = shared::Pallet::<Test>::active_validator_keys();
+
+	crate::paras_inherent::sanitize_bitfields::<Test>(
+		unchecked_bitfields,
+		disputed_bitfield,
+		expected_bits,
+		parent_hash,
+		session_index,
+		&validators,
+	)
+}
+/// Process a set of already sanitized bitfields.
+pub(crate) fn process_bitfields(
+	expected_bits: usize,
+	signed_bitfields: SignedAvailabilityBitfields,
+	core_lookup: impl Fn(CoreIndex) -> Option<ParaId>,
+) -> Vec<(CoreIndex, CandidateHash)> {
+	let validators = shared::Pallet::<Test>::active_validator_keys();
+
+	ParaInclusion::update_pending_availability_and_get_freed_cores::<_>(
+		expected_bits,
+		&validators[..],
+		signed_bitfields,
+		core_lookup,
+	)
+}
+
 #[test]
 fn collect_pending_cleans_up_pending() {
-	let chain_a = ParaId::from(1);
-	let chain_b = ParaId::from(2);
-	let thread_a = ParaId::from(3);
+	let chain_a = ParaId::from(1_u32);
+	let chain_b = ParaId::from(2_u32);
+	let thread_a = ParaId::from(3_u32);
 
-	let paras = vec![(chain_a, true), (chain_b, true), (thread_a, false)];
+	let paras = vec![
+		(chain_a, ParaKind::Parachain),
+		(chain_b, ParaKind::Parachain),
+		(thread_a, ParaKind::Parathread),
+	];
 	new_test_ext(genesis_config(paras)).execute_with(|| {
 		let default_candidate = TestCandidateBuilder::default().build();
 		<PendingAvailability<Test>>::insert(
@@ -364,11 +409,15 @@ fn collect_pending_cleans_up_pending() {
 
 #[test]
 fn bitfield_checks() {
-	let chain_a = ParaId::from(1);
-	let chain_b = ParaId::from(2);
-	let thread_a = ParaId::from(3);
+	let chain_a = ParaId::from(1_u32);
+	let chain_b = ParaId::from(2_u32);
+	let thread_a = ParaId::from(3_u32);
 
-	let paras = vec![(chain_a, true), (chain_b, true), (thread_a, false)];
+	let paras = vec![
+		(chain_a, ParaKind::Parachain),
+		(chain_b, ParaKind::Parachain),
+		(thread_a, ParaKind::Parathread),
+	];
 	let validators = vec![
 		Sr25519Keyring::Alice,
 		Sr25519Keyring::Bob,
@@ -376,9 +425,9 @@ fn bitfield_checks() {
 		Sr25519Keyring::Dave,
 		Sr25519Keyring::Ferdie,
 	];
-	let keystore: SyncCryptoStorePtr = Arc::new(LocalKeystore::in_memory());
+	let keystore: KeystorePtr = Arc::new(LocalKeystore::in_memory());
 	for validator in validators.iter() {
-		SyncCryptoStore::sr25519_generate_new(
+		Keystore::sr25519_generate_new(
 			&*keystore,
 			PARACHAIN_KEY_TYPE_ID,
 			Some(&validator.to_seed()),
@@ -402,220 +451,97 @@ fn bitfield_checks() {
 			_ => panic!("out of bounds for testing"),
 		};
 
-		// mark all candidates as pending availability
-		let set_pending_av = || {
-			for (p_id, _) in paras {
-				let receipt = dummy_candidate_receipt(dummy_hash());
-				PendingAvailability::<Test>::insert(
-					p_id,
-					CandidatePendingAvailability {
-						availability_votes: default_availability_votes(),
-						core: CoreIndex(0),
-						hash: receipt.hash(),
-						descriptor: receipt.descriptor,
-						backers: BitVec::default(),
-						relay_parent_number: BlockNumber::from(0_u32),
-						backed_in_number: BlockNumber::from(0_u32),
-						backing_group: GroupIndex(0),
-					},
-				)
-			}
-		};
-
 		// too many bits in bitfield
 		{
 			let mut bare_bitfield = default_bitfield();
 			bare_bitfield.0.push(false);
-			let signed = block_on(sign_bitfield(
+			let signed = sign_bitfield(
 				&keystore,
 				&validators[0],
 				ValidatorIndex(0),
 				bare_bitfield,
 				&signing_context,
-			));
+			);
 
-			assert_matches!(
-				ParaInclusion::process_bitfields(
-					expected_bits(),
-					vec![signed.into()],
-					DisputedBitfield::zeros(expected_bits()),
-					&core_lookup,
-					FullCheck::Yes,
-				),
-				Err(Error::<Test>::WrongBitfieldSize)
+			let checked_bitfields = simple_sanitize_bitfields(
+				vec![signed.into()],
+				DisputedBitfield::zeros(expected_bits()),
+				expected_bits(),
+			);
+			assert_eq!(
+				checked_bitfields.len(),
+				0,
+				"Bitfield has wrong size, it should have been filtered."
 			);
 		}
 
 		// not enough bits
 		{
 			let bare_bitfield = default_bitfield();
-			let signed = block_on(sign_bitfield(
+			let signed = sign_bitfield(
 				&keystore,
 				&validators[0],
 				ValidatorIndex(0),
 				bare_bitfield,
 				&signing_context,
-			));
-
-			assert_matches!(
-				ParaInclusion::process_bitfields(
-					expected_bits() + 1,
-					vec![signed.into()],
-					DisputedBitfield::zeros(expected_bits()),
-					&core_lookup,
-					FullCheck::Yes,
-				),
-				Err(Error::<Test>::WrongBitfieldSize)
 			);
-		}
 
-		// duplicate.
-		{
-			set_pending_av.clone()();
-			let back_core_0_bitfield = {
-				let mut b = default_bitfield();
-				b.0.set(0, true);
-				b
-			};
-			let signed: UncheckedSignedAvailabilityBitfield = block_on(sign_bitfield(
-				&keystore,
-				&validators[0],
-				ValidatorIndex(0),
-				back_core_0_bitfield,
-				&signing_context,
-			))
-			.into();
-
+			let checked_bitfields = simple_sanitize_bitfields(
+				vec![signed.into()],
+				DisputedBitfield::zeros(expected_bits()),
+				expected_bits() + 1,
+			);
 			assert_eq!(
-				<PendingAvailability<Test>>::get(chain_a)
-					.unwrap()
-					.availability_votes
-					.count_ones(),
-				0
+				checked_bitfields.len(),
+				0,
+				"Bitfield has wrong size, it should have been filtered."
 			);
-
-			// the threshold to free a core is 4 availability votes, but we only expect 1 valid
-			// valid bitfield.
-			assert_matches!(
-				ParaInclusion::process_bitfields(
-					expected_bits(),
-					vec![signed.clone(), signed],
-					DisputedBitfield::zeros(expected_bits()),
-					&core_lookup,
-					FullCheck::Yes,
-				),
-				Err(Error::<Test>::UnsortedOrDuplicateValidatorIndices)
-			);
-
-			assert_eq!(
-				<PendingAvailability<Test>>::get(chain_a)
-					.unwrap()
-					.availability_votes
-					.count_ones(),
-				0
-			);
-
-			// clean up
-			PendingAvailability::<Test>::remove_all(None);
-		}
-
-		// out of order.
-		{
-			set_pending_av.clone()();
-			let back_core_0_bitfield = {
-				let mut b = default_bitfield();
-				b.0.set(0, true);
-				b
-			};
-			let signed_0 = block_on(sign_bitfield(
-				&keystore,
-				&validators[0],
-				ValidatorIndex(0),
-				back_core_0_bitfield.clone(),
-				&signing_context,
-			))
-			.into();
-
-			let signed_1 = block_on(sign_bitfield(
-				&keystore,
-				&validators[1],
-				ValidatorIndex(1),
-				back_core_0_bitfield,
-				&signing_context,
-			))
-			.into();
-
-			assert_eq!(
-				<PendingAvailability<Test>>::get(chain_a)
-					.unwrap()
-					.availability_votes
-					.count_ones(),
-				0
-			);
-
-			// the threshold to free a core is 4 availability votes, but we only expect 1 valid
-			// valid bitfield because `signed_0` will get skipped for being out of order.
-			assert_matches!(
-				ParaInclusion::process_bitfields(
-					expected_bits(),
-					vec![signed_1, signed_0],
-					DisputedBitfield::zeros(expected_bits()),
-					&core_lookup,
-					FullCheck::Yes,
-				),
-				Err(Error::<Test>::UnsortedOrDuplicateValidatorIndices)
-			);
-
-			assert_eq!(
-				<PendingAvailability<Test>>::get(chain_a)
-					.unwrap()
-					.availability_votes
-					.count_ones(),
-				0
-			);
-
-			PendingAvailability::<Test>::remove_all(None);
 		}
 
 		// non-pending bit set.
 		{
 			let mut bare_bitfield = default_bitfield();
 			*bare_bitfield.0.get_mut(0).unwrap() = true;
-			let signed = block_on(sign_bitfield(
+			let signed = sign_bitfield(
 				&keystore,
 				&validators[0],
 				ValidatorIndex(0),
 				bare_bitfield,
 				&signing_context,
-			));
+			);
 
-			assert_matches!(ParaInclusion::process_bitfields(
-				expected_bits(),
+			// the threshold to free a core is 4 availability votes, but we only expect 1 valid
+			// valid bitfield because `signed_0` will get skipped for being out of order.
+			let checked_bitfields = simple_sanitize_bitfields(
 				vec![signed.into()],
 				DisputedBitfield::zeros(expected_bits()),
-				&core_lookup,
-				FullCheck::Yes,
-			), Ok(x) => { assert!(x.is_empty())});
+				expected_bits(),
+			);
+			assert_eq!(checked_bitfields.len(), 1, "No bitfields should have been filtered!");
+
+			let x = process_bitfields(expected_bits(), checked_bitfields, core_lookup);
+			assert!(x.is_empty(), "No core should be freed.");
 		}
 
 		// empty bitfield signed: always ok, but kind of useless.
 		{
 			let bare_bitfield = default_bitfield();
-			let signed = block_on(sign_bitfield(
+			let signed = sign_bitfield(
 				&keystore,
 				&validators[0],
 				ValidatorIndex(0),
 				bare_bitfield,
 				&signing_context,
-			));
-
-			assert_matches!(ParaInclusion::process_bitfields(
-				expected_bits(),
+			);
+			let checked_bitfields = simple_sanitize_bitfields(
 				vec![signed.into()],
 				DisputedBitfield::zeros(expected_bits()),
-				&core_lookup,
-				FullCheck::Yes,
-			), Ok(x) => { assert!(x.is_empty())});
+				expected_bits(),
+			);
+			assert_eq!(checked_bitfields.len(), 1, "No bitfields should have been filtered!");
+
+			let x = process_bitfields(expected_bits(), checked_bitfields, core_lookup);
+			assert!(x.is_empty(), "No core should be freed.");
 		}
 
 		// bitfield signed with pending bit signed.
@@ -641,21 +567,23 @@ fn bitfield_checks() {
 			PendingAvailabilityCommitments::<Test>::insert(chain_a, default_candidate.commitments);
 
 			*bare_bitfield.0.get_mut(0).unwrap() = true;
-			let signed = block_on(sign_bitfield(
+			let signed = sign_bitfield(
 				&keystore,
 				&validators[0],
 				ValidatorIndex(0),
 				bare_bitfield,
 				&signing_context,
-			));
+			);
 
-			assert_matches!(ParaInclusion::process_bitfields(
-				expected_bits(),
+			let checked_bitfields = simple_sanitize_bitfields(
 				vec![signed.into()],
 				DisputedBitfield::zeros(expected_bits()),
-				&core_lookup,
-				FullCheck::Yes,
-			), Ok(v) => { assert!(v.is_empty())} );
+				expected_bits(),
+			);
+			assert_eq!(checked_bitfields.len(), 1, "No bitfields should have been filtered!");
+
+			let x = process_bitfields(expected_bits(), checked_bitfields, core_lookup);
+			assert!(x.is_empty(), "No core should be freed.");
 
 			<PendingAvailability<Test>>::remove(chain_a);
 			PendingAvailabilityCommitments::<Test>::remove(chain_a);
@@ -683,33 +611,46 @@ fn bitfield_checks() {
 			);
 
 			*bare_bitfield.0.get_mut(0).unwrap() = true;
-			let signed = block_on(sign_bitfield(
+			let signed = sign_bitfield(
 				&keystore,
 				&validators[0],
 				ValidatorIndex(0),
 				bare_bitfield,
 				&signing_context,
-			));
+			);
 
-			// no core is freed
-			assert_matches!(ParaInclusion::process_bitfields(
-				expected_bits(),
+			let checked_bitfields = simple_sanitize_bitfields(
 				vec![signed.into()],
 				DisputedBitfield::zeros(expected_bits()),
-				&core_lookup,
-				FullCheck::Yes,
-			), Ok(v) => { assert!(v.is_empty()) });
+				expected_bits(),
+			);
+			assert_eq!(checked_bitfields.len(), 1, "No bitfields should have been filtered!");
+
+			let x = process_bitfields(expected_bits(), checked_bitfields, core_lookup);
+			// no core is freed
+			assert!(x.is_empty(), "No core should be freed.");
 		}
 	});
 }
 
 #[test]
-fn supermajority_bitfields_trigger_availability() {
-	let chain_a = ParaId::from(1);
-	let chain_b = ParaId::from(2);
-	let thread_a = ParaId::from(3);
+fn availability_threshold_is_supermajority() {
+	assert_eq!(3, availability_threshold(4));
+	assert_eq!(5, availability_threshold(6));
+	assert_eq!(7, availability_threshold(9));
+}
 
-	let paras = vec![(chain_a, true), (chain_b, true), (thread_a, false)];
+#[test]
+fn supermajority_bitfields_trigger_availability() {
+	let chain_a = ParaId::from(1_u32);
+	let chain_b = ParaId::from(2_u32);
+	let thread_a = ParaId::from(3_u32);
+
+	let paras = vec![
+		(chain_a, ParaKind::Parachain),
+		(chain_b, ParaKind::Parachain),
+		(thread_a, ParaKind::Parathread),
+	];
 	let validators = vec![
 		Sr25519Keyring::Alice,
 		Sr25519Keyring::Bob,
@@ -717,9 +658,9 @@ fn supermajority_bitfields_trigger_availability() {
 		Sr25519Keyring::Dave,
 		Sr25519Keyring::Ferdie,
 	];
-	let keystore: SyncCryptoStorePtr = Arc::new(LocalKeystore::in_memory());
+	let keystore: KeystorePtr = Arc::new(LocalKeystore::in_memory());
 	for validator in validators.iter() {
-		SyncCryptoStore::sr25519_generate_new(
+		Keystore::sr25519_generate_new(
 			&*keystore,
 			PARACHAIN_KEY_TYPE_ID,
 			Some(&validator.to_seed()),
@@ -822,31 +763,29 @@ fn supermajority_bitfields_trigger_availability() {
 				};
 
 				Some(
-					block_on(sign_bitfield(
+					sign_bitfield(
 						&keystore,
 						key,
 						ValidatorIndex(i as _),
 						to_sign,
 						&signing_context,
-					))
+					)
 					.into(),
 				)
 			})
-			.collect();
+			.collect::<Vec<_>>();
+
+		let old_len = signed_bitfields.len();
+		let checked_bitfields = simple_sanitize_bitfields(
+			signed_bitfields,
+			DisputedBitfield::zeros(expected_bits()),
+			expected_bits(),
+		);
+		assert_eq!(checked_bitfields.len(), old_len, "No bitfields should have been filtered!");
 
 		// only chain A's core is freed.
-		assert_matches!(
-			ParaInclusion::process_bitfields(
-				expected_bits(),
-				signed_bitfields,
-				DisputedBitfield::zeros(expected_bits()),
-				&core_lookup,
-				FullCheck::Yes,
-			),
-			Ok(v) => {
-				assert_eq!(vec![(CoreIndex(0), candidate_a.hash())], v);
-			}
-		);
+		let v = process_bitfields(expected_bits(), checked_bitfields, core_lookup);
+		assert_eq!(vec![(CoreIndex(0), candidate_a.hash())], v);
 
 		// chain A had 4 signing off, which is >= threshold.
 		// chain B has 3 signing off, which is < threshold.
@@ -890,14 +829,18 @@ fn supermajority_bitfields_trigger_availability() {
 
 #[test]
 fn candidate_checks() {
-	let chain_a = ParaId::from(1);
-	let chain_b = ParaId::from(2);
-	let thread_a = ParaId::from(3);
+	let chain_a = ParaId::from(1_u32);
+	let chain_b = ParaId::from(2_u32);
+	let thread_a = ParaId::from(3_u32);
 
 	// The block number of the relay-parent for testing.
 	const RELAY_PARENT_NUM: BlockNumber = 4;
 
-	let paras = vec![(chain_a, true), (chain_b, true), (thread_a, false)];
+	let paras = vec![
+		(chain_a, ParaKind::Parachain),
+		(chain_b, ParaKind::Parachain),
+		(thread_a, ParaKind::Parathread),
+	];
 	let validators = vec![
 		Sr25519Keyring::Alice,
 		Sr25519Keyring::Bob,
@@ -905,9 +848,9 @@ fn candidate_checks() {
 		Sr25519Keyring::Dave,
 		Sr25519Keyring::Ferdie,
 	];
-	let keystore: SyncCryptoStorePtr = Arc::new(LocalKeystore::in_memory());
+	let keystore: KeystorePtr = Arc::new(LocalKeystore::in_memory());
 	for validator in validators.iter() {
-		SyncCryptoStore::sr25519_generate_new(
+		Keystore::sr25519_generate_new(
 			&*keystore,
 			PARACHAIN_KEY_TYPE_ID,
 			Some(&validator.to_seed()),
@@ -971,14 +914,14 @@ fn candidate_checks() {
 			.build();
 			collator_sign_candidate(Sr25519Keyring::One, &mut candidate);
 
-			let backed = block_on(back_candidate(
+			let backed = back_candidate(
 				candidate,
 				&validators,
 				group_validators(GroupIndex::from(0)).unwrap().as_ref(),
 				&keystore,
 				&signing_context,
 				BackingKind::Threshold,
-			));
+			);
 
 			assert_noop!(
 				ParaInclusion::process_candidates(
@@ -1016,23 +959,23 @@ fn candidate_checks() {
 
 			collator_sign_candidate(Sr25519Keyring::Two, &mut candidate_b);
 
-			let backed_a = block_on(back_candidate(
+			let backed_a = back_candidate(
 				candidate_a,
 				&validators,
 				group_validators(GroupIndex::from(0)).unwrap().as_ref(),
 				&keystore,
 				&signing_context,
 				BackingKind::Threshold,
-			));
+			);
 
-			let backed_b = block_on(back_candidate(
+			let backed_b = back_candidate(
 				candidate_b,
 				&validators,
 				group_validators(GroupIndex::from(1)).unwrap().as_ref(),
 				&keystore,
 				&signing_context,
 				BackingKind::Threshold,
-			));
+			);
 
 			// out-of-order manifests as unscheduled.
 			assert_noop!(
@@ -1059,14 +1002,14 @@ fn candidate_checks() {
 			.build();
 			collator_sign_candidate(Sr25519Keyring::One, &mut candidate);
 
-			let backed = block_on(back_candidate(
+			let backed = back_candidate(
 				candidate,
 				&validators,
 				group_validators(GroupIndex::from(0)).unwrap().as_ref(),
 				&keystore,
 				&signing_context,
 				BackingKind::Lacking,
-			));
+			);
 
 			assert_noop!(
 				ParaInclusion::process_candidates(
@@ -1094,14 +1037,14 @@ fn candidate_checks() {
 			.build();
 			collator_sign_candidate(Sr25519Keyring::One, &mut candidate);
 
-			let backed = block_on(back_candidate(
+			let backed = back_candidate(
 				candidate,
 				&validators,
 				group_validators(GroupIndex::from(0)).unwrap().as_ref(),
 				&keystore,
 				&signing_context,
 				BackingKind::Threshold,
-			));
+			);
 
 			assert_noop!(
 				ParaInclusion::process_candidates(
@@ -1129,14 +1072,14 @@ fn candidate_checks() {
 			assert!(CollatorId::from(Sr25519Keyring::One.public()) != thread_collator);
 			collator_sign_candidate(Sr25519Keyring::One, &mut candidate);
 
-			let backed = block_on(back_candidate(
+			let backed = back_candidate(
 				candidate,
 				&validators,
 				group_validators(GroupIndex::from(2)).unwrap().as_ref(),
 				&keystore,
 				&signing_context,
 				BackingKind::Threshold,
-			));
+			);
 
 			assert_noop!(
 				ParaInclusion::process_candidates(
@@ -1171,14 +1114,14 @@ fn candidate_checks() {
 			// change the candidate after signing.
 			candidate.descriptor.pov_hash = Hash::repeat_byte(2);
 
-			let backed = block_on(back_candidate(
+			let backed = back_candidate(
 				candidate,
 				&validators,
 				group_validators(GroupIndex::from(2)).unwrap().as_ref(),
 				&keystore,
 				&signing_context,
 				BackingKind::Threshold,
-			));
+			);
 
 			assert_noop!(
 				ParaInclusion::process_candidates(
@@ -1205,14 +1148,14 @@ fn candidate_checks() {
 
 			collator_sign_candidate(Sr25519Keyring::One, &mut candidate);
 
-			let backed = block_on(back_candidate(
+			let backed = back_candidate(
 				candidate,
 				&validators,
 				group_validators(GroupIndex::from(0)).unwrap().as_ref(),
 				&keystore,
 				&signing_context,
 				BackingKind::Threshold,
-			));
+			);
 
 			let candidate = TestCandidateBuilder::default().build();
 			<PendingAvailability<Test>>::insert(
@@ -1261,14 +1204,14 @@ fn candidate_checks() {
 			// this is not supposed to happen
 			<PendingAvailabilityCommitments<Test>>::insert(&chain_a, candidate.commitments.clone());
 
-			let backed = block_on(back_candidate(
+			let backed = back_candidate(
 				candidate,
 				&validators,
 				group_validators(GroupIndex::from(0)).unwrap().as_ref(),
 				&keystore,
 				&signing_context,
 				BackingKind::Threshold,
-			));
+			);
 
 			assert_noop!(
 				ParaInclusion::process_candidates(
@@ -1298,14 +1241,14 @@ fn candidate_checks() {
 
 			collator_sign_candidate(Sr25519Keyring::One, &mut candidate);
 
-			let backed = block_on(back_candidate(
+			let backed = back_candidate(
 				candidate,
 				&validators,
 				group_validators(GroupIndex::from(0)).unwrap().as_ref(),
 				&keystore,
 				&signing_context,
 				BackingKind::Threshold,
-			));
+			);
 
 			{
 				let cfg = Configuration::config();
@@ -1339,14 +1282,14 @@ fn candidate_checks() {
 
 			collator_sign_candidate(Sr25519Keyring::One, &mut candidate);
 
-			let backed = block_on(back_candidate(
+			let backed = back_candidate(
 				candidate,
 				&validators,
 				group_validators(GroupIndex::from(0)).unwrap().as_ref(),
 				&keystore,
 				&signing_context,
 				BackingKind::Threshold,
-			));
+			);
 
 			assert_eq!(
 				ParaInclusion::process_candidates(
@@ -1374,14 +1317,14 @@ fn candidate_checks() {
 
 			collator_sign_candidate(Sr25519Keyring::One, &mut candidate);
 
-			let backed = block_on(back_candidate(
+			let backed = back_candidate(
 				candidate,
 				&validators,
 				group_validators(GroupIndex::from(0)).unwrap().as_ref(),
 				&keystore,
 				&signing_context,
 				BackingKind::Threshold,
-			));
+			);
 
 			assert_noop!(
 				ParaInclusion::process_candidates(
@@ -1409,14 +1352,14 @@ fn candidate_checks() {
 
 			collator_sign_candidate(Sr25519Keyring::One, &mut candidate);
 
-			let backed = block_on(back_candidate(
+			let backed = back_candidate(
 				candidate,
 				&validators,
 				group_validators(GroupIndex::from(0)).unwrap().as_ref(),
 				&keystore,
 				&signing_context,
 				BackingKind::Threshold,
-			));
+			);
 
 			assert_noop!(
 				ParaInclusion::process_candidates(
@@ -1433,14 +1376,18 @@ fn candidate_checks() {
 
 #[test]
 fn backing_works() {
-	let chain_a = ParaId::from(1);
-	let chain_b = ParaId::from(2);
-	let thread_a = ParaId::from(3);
+	let chain_a = ParaId::from(1_u32);
+	let chain_b = ParaId::from(2_u32);
+	let thread_a = ParaId::from(3_u32);
 
 	// The block number of the relay-parent for testing.
 	const RELAY_PARENT_NUM: BlockNumber = 4;
 
-	let paras = vec![(chain_a, true), (chain_b, true), (thread_a, false)];
+	let paras = vec![
+		(chain_a, ParaKind::Parachain),
+		(chain_b, ParaKind::Parachain),
+		(thread_a, ParaKind::Parathread),
+	];
 	let validators = vec![
 		Sr25519Keyring::Alice,
 		Sr25519Keyring::Bob,
@@ -1448,9 +1395,9 @@ fn backing_works() {
 		Sr25519Keyring::Dave,
 		Sr25519Keyring::Ferdie,
 	];
-	let keystore: SyncCryptoStorePtr = Arc::new(LocalKeystore::in_memory());
+	let keystore: KeystorePtr = Arc::new(LocalKeystore::in_memory());
 	for validator in validators.iter() {
-		SyncCryptoStore::sr25519_generate_new(
+		Keystore::sr25519_generate_new(
 			&*keystore,
 			PARACHAIN_KEY_TYPE_ID,
 			Some(&validator.to_seed()),
@@ -1534,32 +1481,32 @@ fn backing_works() {
 		.build();
 		collator_sign_candidate(Sr25519Keyring::Two, &mut candidate_c);
 
-		let backed_a = block_on(back_candidate(
+		let backed_a = back_candidate(
 			candidate_a.clone(),
 			&validators,
 			group_validators(GroupIndex::from(0)).unwrap().as_ref(),
 			&keystore,
 			&signing_context,
 			BackingKind::Threshold,
-		));
+		);
 
-		let backed_b = block_on(back_candidate(
+		let backed_b = back_candidate(
 			candidate_b.clone(),
 			&validators,
 			group_validators(GroupIndex::from(1)).unwrap().as_ref(),
 			&keystore,
 			&signing_context,
 			BackingKind::Threshold,
-		));
+		);
 
-		let backed_c = block_on(back_candidate(
+		let backed_c = back_candidate(
 			candidate_c.clone(),
 			&validators,
 			group_validators(GroupIndex::from(2)).unwrap().as_ref(),
 			&keystore,
 			&signing_context,
 			BackingKind::Threshold,
-		));
+		);
 
 		let backed_candidates = vec![backed_a, backed_b, backed_c];
 		let get_backing_group_idx = {
@@ -1715,12 +1662,12 @@ fn backing_works() {
 
 #[test]
 fn can_include_candidate_with_ok_code_upgrade() {
-	let chain_a = ParaId::from(1);
+	let chain_a = ParaId::from(1_u32);
 
 	// The block number of the relay-parent for testing.
 	const RELAY_PARENT_NUM: BlockNumber = 4;
 
-	let paras = vec![(chain_a, true)];
+	let paras = vec![(chain_a, ParaKind::Parachain)];
 	let validators = vec![
 		Sr25519Keyring::Alice,
 		Sr25519Keyring::Bob,
@@ -1728,9 +1675,9 @@ fn can_include_candidate_with_ok_code_upgrade() {
 		Sr25519Keyring::Dave,
 		Sr25519Keyring::Ferdie,
 	];
-	let keystore: SyncCryptoStorePtr = Arc::new(LocalKeystore::in_memory());
+	let keystore: KeystorePtr = Arc::new(LocalKeystore::in_memory());
 	for validator in validators.iter() {
-		SyncCryptoStore::sr25519_generate_new(
+		Keystore::sr25519_generate_new(
 			&*keystore,
 			PARACHAIN_KEY_TYPE_ID,
 			Some(&validator.to_seed()),
@@ -1775,14 +1722,14 @@ fn can_include_candidate_with_ok_code_upgrade() {
 		.build();
 		collator_sign_candidate(Sr25519Keyring::One, &mut candidate_a);
 
-		let backed_a = block_on(back_candidate(
+		let backed_a = back_candidate(
 			candidate_a.clone(),
 			&validators,
 			group_validators(GroupIndex::from(0)).unwrap().as_ref(),
 			&keystore,
 			&signing_context,
 			BackingKind::Threshold,
-		));
+		);
 
 		let ProcessedCandidates { core_indices: occupied_cores, .. } =
 			ParaInclusion::process_candidates(
@@ -1821,11 +1768,15 @@ fn can_include_candidate_with_ok_code_upgrade() {
 
 #[test]
 fn session_change_wipes() {
-	let chain_a = ParaId::from(1);
-	let chain_b = ParaId::from(2);
-	let thread_a = ParaId::from(3);
+	let chain_a = ParaId::from(1_u32);
+	let chain_b = ParaId::from(2_u32);
+	let thread_a = ParaId::from(3_u32);
 
-	let paras = vec![(chain_a, true), (chain_b, true), (thread_a, false)];
+	let paras = vec![
+		(chain_a, ParaKind::Parachain),
+		(chain_b, ParaKind::Parachain),
+		(thread_a, ParaKind::Parathread),
+	];
 	let validators = vec![
 		Sr25519Keyring::Alice,
 		Sr25519Keyring::Bob,
@@ -1833,9 +1784,9 @@ fn session_change_wipes() {
 		Sr25519Keyring::Dave,
 		Sr25519Keyring::Ferdie,
 	];
-	let keystore: SyncCryptoStorePtr = Arc::new(LocalKeystore::in_memory());
+	let keystore: KeystorePtr = Arc::new(LocalKeystore::in_memory());
 	for validator in validators.iter() {
-		SyncCryptoStore::sr25519_generate_new(
+		Keystore::sr25519_generate_new(
 			&*keystore,
 			PARACHAIN_KEY_TYPE_ID,
 			Some(&validator.to_seed()),
@@ -1943,4 +1894,11 @@ fn session_change_wipes() {
 	});
 }
 
-// TODO [now]: test `collect_disputed`
+/// Assert that the encoding of a known `AggregateMessageOrigin` did not change.
+#[test]
+fn aggregate_origin_decode_regression_check() {
+	let ump = AggregateMessageOrigin::Ump(UmpQueueId::Para(u32::MAX.into()));
+	let raw = (0u8, 0u8, u32::MAX).encode();
+	let decoded = AggregateMessageOrigin::decode_all(&mut &raw[..]);
+	assert_eq!(decoded, Ok(ump), "Migration needed for AggregateMessageOrigin");
+}

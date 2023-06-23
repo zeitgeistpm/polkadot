@@ -1,4 +1,4 @@
-// Copyright 2021 Parity Technologies (UK) Ltd.
+// Copyright (C) Parity Technologies (UK) Ltd.
 // This file is part of Polkadot.
 
 // Polkadot is free software: you can redistribute it and/or modify
@@ -14,16 +14,14 @@
 // You should have received a copy of the GNU General Public License
 // along with Polkadot.  If not, see <http://www.gnu.org/licenses/>.
 
-use std::collections::HashSet;
+use std::{collections::HashSet, num::NonZeroUsize};
 
 use lru::LruCache;
 use rand::{seq::SliceRandom, thread_rng};
 
+use polkadot_node_subsystem::overseer;
 use polkadot_node_subsystem_util::runtime::RuntimeInfo;
-use polkadot_primitives::v2::{
-	AuthorityDiscoveryId, GroupIndex, Hash, SessionIndex, ValidatorIndex,
-};
-use polkadot_subsystem::SubsystemContext;
+use polkadot_primitives::{AuthorityDiscoveryId, GroupIndex, Hash, SessionIndex, ValidatorIndex};
 
 use crate::{
 	error::{Error, Result},
@@ -79,12 +77,13 @@ pub struct BadValidators {
 	pub bad_validators: Vec<AuthorityDiscoveryId>,
 }
 
+#[overseer::contextbounds(AvailabilityDistribution, prefix = self::overseer)]
 impl SessionCache {
 	/// Create a new `SessionCache`.
 	pub fn new() -> Self {
 		SessionCache {
 			// We need to cache the current and the last session the most:
-			session_info_cache: LruCache::new(2),
+			session_info_cache: LruCache::new(NonZeroUsize::new(2).unwrap()),
 		}
 	}
 
@@ -103,7 +102,6 @@ impl SessionCache {
 		with_info: F,
 	) -> Result<Option<R>>
 	where
-		Context: SubsystemContext,
 		F: FnOnce(&SessionInfo) -> R,
 	{
 		if let Some(o_info) = self.session_info_cache.get(&session_index) {
@@ -178,10 +176,7 @@ impl SessionCache {
 		runtime: &mut RuntimeInfo,
 		relay_parent: Hash,
 		session_index: SessionIndex,
-	) -> Result<Option<SessionInfo>>
-	where
-		Context: SubsystemContext,
-	{
+	) -> Result<Option<SessionInfo>> {
 		let info = runtime
 			.get_session_info_by_index(ctx.sender(), relay_parent, session_index)
 			.await?;

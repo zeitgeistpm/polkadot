@@ -14,14 +14,14 @@ Input:
 Output:
 
 - `NetworkBridge::SendMessage(PeerId, message)`
-- `NetworkBridge::SendRequests(StatementFetching)`
+- `NetworkBridge::SendRequests(StatementFetchingV1)`
 - `NetworkBridge::ReportPeer(PeerId, cost_or_benefit)`
 
 ## Functionality
 
 Implemented as a gossip protocol. Handle updates to our view and peers' views. Neighbor packets are used to inform peers which chain heads we are interested in data for.
 
-It is responsible for distributing signed statements that we have generated and forwarding them, and for detecting a variety of Validator misbehaviors for reporting to [Misbehavior Arbitration](../utility/misbehavior-arbitration.md). During the Backing stage of the inclusion pipeline, it's the main point of contact with peer nodes. On receiving a signed statement from a peer in the same backing group, assuming the peer receipt state machine is in an appropriate state, it sends the Candidate Receipt to the [Candidate Backing subsystem](candidate-backing.md) to handle the validator's statement. On receiving `StatementDistributionMessage::Share` we make sure to send messages to our backing group in addition to random other peers, to ensure a fast backing process and getting all statements quickly for distribution.
+It is responsible for distributing signed statements that we have generated and forwarding them, and for detecting a variety of Validator misbehaviors for reporting to the [Provisioner Subsystem](../utility/provisioner.md). During the Backing stage of the inclusion pipeline, it's the main point of contact with peer nodes. On receiving a signed statement from a peer in the same backing group, assuming the peer receipt state machine is in an appropriate state, it sends the Candidate Receipt to the [Candidate Backing subsystem](candidate-backing.md) to handle the validator's statement. On receiving `StatementDistributionMessage::Share` we make sure to send messages to our backing group in addition to random other peers, to ensure a fast backing process and getting all statements quickly for distribution.
 
 Track equivocating validators and stop accepting information from them. Establish a data-dependency order:
 
@@ -86,7 +86,7 @@ example. For this reason, there exists a `LargeStatement` constructor for the
 of a statement. The actual candidate data is not included. This message type is
 used whenever a message is deemed large. The receiver of such a message needs to
 request the actual payload via request/response by means of a
-`StatementFetching` request.
+`StatementFetchingV1` request.
 
 This is necessary as distribution of a large payload (mega bytes) via gossip
 would make the network collapse and timely distribution of statements would no

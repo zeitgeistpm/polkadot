@@ -1,4 +1,4 @@
-// Copyright 2020 Parity Technologies (UK) Ltd.
+// Copyright (C) Parity Technologies (UK) Ltd.
 // This file is part of Polkadot.
 
 // Polkadot is free software: you can redistribute it and/or modify
@@ -19,20 +19,13 @@
 
 use sp_std::vec::Vec;
 
+use bounded_collections::{BoundedVec, ConstU32};
 use frame_support::weights::Weight;
 use parity_scale_codec::{CompactAs, Decode, Encode, MaxEncodedLen};
 use scale_info::TypeInfo;
-use sp_core::{RuntimeDebug, TypeId};
-use sp_runtime::traits::Hash as _;
-
-#[cfg(feature = "std")]
 use serde::{Deserialize, Serialize};
-
-#[cfg(feature = "std")]
-use sp_core::bytes;
-
-#[cfg(feature = "std")]
-use parity_util_mem::MallocSizeOf;
+use sp_core::{bytes, RuntimeDebug, TypeId};
+use sp_runtime::traits::Hash as _;
 
 use polkadot_core_primitives::{Hash, OutboundHrmpMessage};
 
@@ -41,10 +34,21 @@ pub use polkadot_core_primitives::BlockNumber as RelayChainBlockNumber;
 
 /// Parachain head data included in the chain.
 #[derive(
-	PartialEq, Eq, Clone, PartialOrd, Ord, Encode, Decode, RuntimeDebug, derive_more::From, TypeInfo,
+	PartialEq,
+	Eq,
+	Clone,
+	PartialOrd,
+	Ord,
+	Encode,
+	Decode,
+	RuntimeDebug,
+	derive_more::From,
+	TypeInfo,
+	Serialize,
+	Deserialize,
 )]
-#[cfg_attr(feature = "std", derive(Serialize, Deserialize, Hash, MallocSizeOf, Default))]
-pub struct HeadData(#[cfg_attr(feature = "std", serde(with = "bytes"))] pub Vec<u8>);
+#[cfg_attr(feature = "std", derive(Hash, Default))]
+pub struct HeadData(#[serde(with = "bytes")] pub Vec<u8>);
 
 impl HeadData {
 	/// Returns the hash of this head data.
@@ -54,9 +58,20 @@ impl HeadData {
 }
 
 /// Parachain validation code.
-#[derive(PartialEq, Eq, Clone, Encode, Decode, RuntimeDebug, derive_more::From, TypeInfo)]
-#[cfg_attr(feature = "std", derive(Serialize, Deserialize, Hash, MallocSizeOf))]
-pub struct ValidationCode(#[cfg_attr(feature = "std", serde(with = "bytes"))] pub Vec<u8>);
+#[derive(
+	PartialEq,
+	Eq,
+	Clone,
+	Encode,
+	Decode,
+	RuntimeDebug,
+	derive_more::From,
+	TypeInfo,
+	Serialize,
+	Deserialize,
+)]
+#[cfg_attr(feature = "std", derive(Hash))]
+pub struct ValidationCode(#[serde(with = "bytes")] pub Vec<u8>);
 
 impl ValidationCode {
 	/// Get the blake2-256 hash of the validation code bytes.
@@ -65,13 +80,12 @@ impl ValidationCode {
 	}
 }
 
-/// Unit type wrapper around [`Hash`] that represents a validation code hash.
+/// Unit type wrapper around [`type@Hash`] that represents a validation code hash.
 ///
 /// This type is produced by [`ValidationCode::hash`].
 ///
 /// This type makes it easy to enforce that a hash is a validation code hash on the type level.
 #[derive(Clone, Copy, Encode, Decode, Hash, Eq, PartialEq, PartialOrd, Ord, TypeInfo)]
-#[cfg_attr(feature = "std", derive(MallocSizeOf))]
 pub struct ValidationCodeHash(Hash);
 
 impl sp_std::fmt::Display for ValidationCodeHash {
@@ -114,7 +128,7 @@ impl sp_std::fmt::LowerHex for ValidationCodeHash {
 ///
 /// Contains everything required to validate para-block, may contain block and witness data.
 #[derive(PartialEq, Eq, Clone, Encode, Decode, derive_more::From, TypeInfo, RuntimeDebug)]
-#[cfg_attr(feature = "std", derive(Serialize, Deserialize, MallocSizeOf))]
+#[cfg_attr(feature = "std", derive(Serialize, Deserialize))]
 pub struct BlockData(#[cfg_attr(feature = "std", serde(with = "bytes"))] pub Vec<u8>);
 
 /// Unique identifier of a parachain.
@@ -132,12 +146,11 @@ pub struct BlockData(#[cfg_attr(feature = "std", serde(with = "bytes"))] pub Vec
 	PartialEq,
 	PartialOrd,
 	RuntimeDebug,
+	serde::Serialize,
+	serde::Deserialize,
 	TypeInfo,
 )]
-#[cfg_attr(
-	feature = "std",
-	derive(serde::Serialize, serde::Deserialize, derive_more::Display, MallocSizeOf)
-)]
+#[cfg_attr(feature = "std", derive(derive_more::Display))]
 pub struct Id(u32);
 
 impl TypeId for Id {
@@ -274,59 +287,6 @@ impl IsSystem for Sibling {
 	}
 }
 
-/// This type can be converted into and possibly from an [`AccountId`] (which itself is generic).
-pub trait AccountIdConversion<AccountId>: Sized {
-	/// Convert into an account ID. This is infallible.
-	fn into_account(&self) -> AccountId;
-
-	/// Try to convert an account ID into this type. Might not succeed.
-	fn try_from_account(a: &AccountId) -> Option<Self>;
-}
-
-// TODO: Remove all of this, move sp-runtime::AccountIdConversion to own crate and and use that.
-// #360
-struct TrailingZeroInput<'a>(&'a [u8]);
-impl<'a> parity_scale_codec::Input for TrailingZeroInput<'a> {
-	fn remaining_len(&mut self) -> Result<Option<usize>, parity_scale_codec::Error> {
-		Ok(None)
-	}
-
-	fn read(&mut self, into: &mut [u8]) -> Result<(), parity_scale_codec::Error> {
-		let len = into.len().min(self.0.len());
-		into[..len].copy_from_slice(&self.0[..len]);
-		for i in &mut into[len..] {
-			*i = 0;
-		}
-		self.0 = &self.0[len..];
-		Ok(())
-	}
-}
-
-/// Format is b"para" ++ encode(parachain ID) ++ 00.... where 00... is indefinite trailing
-/// zeroes to fill [`AccountId`].
-impl<T: Encode + Decode> AccountIdConversion<T> for Id {
-	fn into_account(&self) -> T {
-		(b"para", self)
-			.using_encoded(|b| T::decode(&mut TrailingZeroInput(b)))
-			.expect("infinite length input; no invalid inputs for type; qed")
-	}
-
-	fn try_from_account(x: &T) -> Option<Self> {
-		x.using_encoded(|d| {
-			if &d[0..4] != b"para" {
-				return None
-			}
-			let mut cursor = &d[4..];
-			let result = Decode::decode(&mut cursor).ok()?;
-			if cursor.iter().all(|x| *x == 0) {
-				Some(result)
-			} else {
-				None
-			}
-		})
-	}
-}
-
 /// A type that uniquely identifies an HRMP channel. An HRMP channel is established between two paras.
 /// In text, we use the notation `(A, B)` to specify a channel between A and B. The channels are
 /// unidirectional, meaning that `(A, B)` and `(B, A)` refer to different channels. The convention is
@@ -369,7 +329,7 @@ impl DmpMessageHandler for () {
 		_max_weight: Weight,
 	) -> Weight {
 		iter.for_each(drop);
-		0
+		Weight::zero()
 	}
 }
 
@@ -402,7 +362,7 @@ impl XcmpMessageHandler for () {
 		_max_weight: Weight,
 	) -> Weight {
 		for _ in iter {}
-		0
+		Weight::zero()
 	}
 }
 
@@ -421,6 +381,22 @@ pub struct ValidationParams {
 	pub relay_parent_storage_root: Hash,
 }
 
+/// Maximum number of HRMP messages allowed per candidate.
+///
+/// We also use this as a generous limit, which still prevents possible memory exhaustion, from
+/// malicious parachains that may otherwise return a huge amount of messages in `ValidationResult`.
+pub const MAX_HORIZONTAL_MESSAGE_NUM: u32 = 16 * 1024;
+/// Maximum number of UMP messages allowed per candidate.
+///
+/// We also use this as a generous limit, which still prevents possible memory exhaustion, from
+/// malicious parachains that may otherwise return a huge amount of messages in `ValidationResult`.
+pub const MAX_UPWARD_MESSAGE_NUM: u32 = 16 * 1024;
+
+pub type UpwardMessages = BoundedVec<UpwardMessage, ConstU32<MAX_UPWARD_MESSAGE_NUM>>;
+
+pub type HorizontalMessages =
+	BoundedVec<OutboundHrmpMessage<Id>, ConstU32<MAX_HORIZONTAL_MESSAGE_NUM>>;
+
 /// The result of parachain validation.
 // TODO: balance uploads (https://github.com/paritytech/polkadot/issues/220)
 #[derive(PartialEq, Eq, Clone, Encode)]
@@ -431,9 +407,9 @@ pub struct ValidationResult {
 	/// An update to the validation code that should be scheduled in the relay chain.
 	pub new_validation_code: Option<ValidationCode>,
 	/// Upward messages send by the Parachain.
-	pub upward_messages: Vec<UpwardMessage>,
+	pub upward_messages: UpwardMessages,
 	/// Outbound horizontal messages sent by the parachain.
-	pub horizontal_messages: Vec<OutboundHrmpMessage<Id>>,
+	pub horizontal_messages: HorizontalMessages,
 	/// Number of downward messages that were processed by the Parachain.
 	///
 	/// It is expected that the Parachain processes them from first to last.

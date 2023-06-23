@@ -1,3 +1,19 @@
+// Copyright (C) Parity Technologies (UK) Ltd.
+// This file is part of Polkadot.
+
+// Polkadot is free software: you can redistribute it and/or modify
+// it under the terms of the GNU General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+
+// Polkadot is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU General Public License for more details.
+
+// You should have received a copy of the GNU General Public License
+// along with Polkadot.  If not, see <http://www.gnu.org/licenses/>.
+
 use super::*;
 
 use futures::{channel::oneshot, future::BoxFuture};
@@ -6,7 +22,7 @@ use std::collections::BTreeMap;
 
 use polkadot_node_primitives::BlockWeight;
 use polkadot_node_subsystem_test_helpers::{make_subsystem_context, TestSubsystemContextHandle};
-use polkadot_primitives::v2::{BlockId, BlockNumber, Hash, Header};
+use polkadot_primitives::{BlockNumber, Hash, Header};
 use sp_blockchain::Info as BlockInfo;
 use sp_core::testing::TaskExecutor;
 
@@ -117,16 +133,14 @@ impl HeaderBackend<Block> for TestClient {
 	fn hash(&self, number: BlockNumber) -> sp_blockchain::Result<Option<Hash>> {
 		Ok(self.finalized_blocks.get(&number).copied())
 	}
-	fn header(&self, id: BlockId) -> sp_blockchain::Result<Option<Header>> {
-		match id {
-			// for error path testing
-			BlockId::Hash(hash) if hash.is_zero() =>
-				Err(sp_blockchain::Error::Backend("Zero hashes are illegal!".into())),
-			BlockId::Hash(hash) => Ok(self.headers.get(&hash).cloned()),
-			_ => unreachable!(),
+	fn header(&self, hash: Hash) -> sp_blockchain::Result<Option<Header>> {
+		if hash.is_zero() {
+			Err(sp_blockchain::Error::Backend("Zero hashes are illegal!".into()))
+		} else {
+			Ok(self.headers.get(&hash).cloned())
 		}
 	}
-	fn status(&self, _id: BlockId) -> sp_blockchain::Result<sp_blockchain::BlockStatus> {
+	fn status(&self, _hash: Hash) -> sp_blockchain::Result<sp_blockchain::BlockStatus> {
 		unimplemented!()
 	}
 }
@@ -184,7 +198,7 @@ fn request_block_number() {
 				let (tx, rx) = oneshot::channel();
 
 				sender
-					.send(FromOverseer::Communication {
+					.send(FromOrchestra::Communication {
 						msg: ChainApiMessage::BlockNumber(*hash, tx),
 					})
 					.await;
@@ -192,7 +206,7 @@ fn request_block_number() {
 				assert_eq!(rx.await.unwrap().unwrap(), *expected);
 			}
 
-			sender.send(FromOverseer::Signal(OverseerSignal::Conclude)).await;
+			sender.send(FromOrchestra::Signal(OverseerSignal::Conclude)).await;
 		}
 		.boxed()
 	})
@@ -203,15 +217,13 @@ fn request_block_header() {
 	test_harness(|client, mut sender| {
 		async move {
 			const NOT_HERE: Hash = Hash::repeat_byte(0x5);
-			let test_cases = [
-				(TWO, client.header(BlockId::Hash(TWO)).unwrap()),
-				(NOT_HERE, client.header(BlockId::Hash(NOT_HERE)).unwrap()),
-			];
+			let test_cases =
+				[(TWO, client.header(TWO).unwrap()), (NOT_HERE, client.header(NOT_HERE).unwrap())];
 			for (hash, expected) in &test_cases {
 				let (tx, rx) = oneshot::channel();
 
 				sender
-					.send(FromOverseer::Communication {
+					.send(FromOrchestra::Communication {
 						msg: ChainApiMessage::BlockHeader(*hash, tx),
 					})
 					.await;
@@ -219,7 +231,7 @@ fn request_block_header() {
 				assert_eq!(rx.await.unwrap().unwrap(), *expected);
 			}
 
-			sender.send(FromOverseer::Signal(OverseerSignal::Conclude)).await;
+			sender.send(FromOrchestra::Signal(OverseerSignal::Conclude)).await;
 		}
 		.boxed()
 	})
@@ -239,7 +251,7 @@ fn request_block_weight() {
 				let (tx, rx) = oneshot::channel();
 
 				sender
-					.send(FromOverseer::Communication {
+					.send(FromOrchestra::Communication {
 						msg: ChainApiMessage::BlockWeight(*hash, tx),
 					})
 					.await;
@@ -247,7 +259,7 @@ fn request_block_weight() {
 				assert_eq!(rx.await.unwrap().unwrap(), *expected);
 			}
 
-			sender.send(FromOverseer::Signal(OverseerSignal::Conclude)).await;
+			sender.send(FromOrchestra::Signal(OverseerSignal::Conclude)).await;
 		}
 		.boxed()
 	})
@@ -265,7 +277,7 @@ fn request_finalized_hash() {
 				let (tx, rx) = oneshot::channel();
 
 				sender
-					.send(FromOverseer::Communication {
+					.send(FromOrchestra::Communication {
 						msg: ChainApiMessage::FinalizedBlockHash(*number, tx),
 					})
 					.await;
@@ -273,7 +285,7 @@ fn request_finalized_hash() {
 				assert_eq!(rx.await.unwrap().unwrap(), *expected);
 			}
 
-			sender.send(FromOverseer::Signal(OverseerSignal::Conclude)).await;
+			sender.send(FromOrchestra::Signal(OverseerSignal::Conclude)).await;
 		}
 		.boxed()
 	})
@@ -287,14 +299,14 @@ fn request_last_finalized_number() {
 
 			let expected = client.info().finalized_number;
 			sender
-				.send(FromOverseer::Communication {
+				.send(FromOrchestra::Communication {
 					msg: ChainApiMessage::FinalizedBlockNumber(tx),
 				})
 				.await;
 
 			assert_eq!(rx.await.unwrap().unwrap(), expected);
 
-			sender.send(FromOverseer::Signal(OverseerSignal::Conclude)).await;
+			sender.send(FromOrchestra::Signal(OverseerSignal::Conclude)).await;
 		}
 		.boxed()
 	})
@@ -306,7 +318,7 @@ fn request_ancestors() {
 		async move {
 			let (tx, rx) = oneshot::channel();
 			sender
-				.send(FromOverseer::Communication {
+				.send(FromOrchestra::Communication {
 					msg: ChainApiMessage::Ancestors { hash: THREE, k: 4, response_channel: tx },
 				})
 				.await;
@@ -315,7 +327,7 @@ fn request_ancestors() {
 			// Limit the number of ancestors.
 			let (tx, rx) = oneshot::channel();
 			sender
-				.send(FromOverseer::Communication {
+				.send(FromOrchestra::Communication {
 					msg: ChainApiMessage::Ancestors { hash: TWO, k: 1, response_channel: tx },
 				})
 				.await;
@@ -324,7 +336,7 @@ fn request_ancestors() {
 			// Ancestor of block #1 is returned.
 			let (tx, rx) = oneshot::channel();
 			sender
-				.send(FromOverseer::Communication {
+				.send(FromOrchestra::Communication {
 					msg: ChainApiMessage::Ancestors { hash: ONE, k: 10, response_channel: tx },
 				})
 				.await;
@@ -333,7 +345,7 @@ fn request_ancestors() {
 			// No ancestors of genesis block.
 			let (tx, rx) = oneshot::channel();
 			sender
-				.send(FromOverseer::Communication {
+				.send(FromOrchestra::Communication {
 					msg: ChainApiMessage::Ancestors { hash: GENESIS, k: 10, response_channel: tx },
 				})
 				.await;
@@ -341,7 +353,7 @@ fn request_ancestors() {
 
 			let (tx, rx) = oneshot::channel();
 			sender
-				.send(FromOverseer::Communication {
+				.send(FromOrchestra::Communication {
 					msg: ChainApiMessage::Ancestors {
 						hash: ERROR_PATH,
 						k: 2,
@@ -351,7 +363,7 @@ fn request_ancestors() {
 				.await;
 			assert!(rx.await.unwrap().is_err());
 
-			sender.send(FromOverseer::Signal(OverseerSignal::Conclude)).await;
+			sender.send(FromOrchestra::Signal(OverseerSignal::Conclude)).await;
 		}
 		.boxed()
 	})

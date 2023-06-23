@@ -1,4 +1,4 @@
-// Copyright 2021 Parity Technologies (UK) Ltd.
+// Copyright (C) Parity Technologies (UK) Ltd.
 // This file is part of Polkadot.
 
 // Polkadot is free software: you can redistribute it and/or modify
@@ -21,37 +21,37 @@ use parity_scale_codec::{Decode, Encode, Error as DecodingError};
 use sc_network as network;
 use sc_network::PeerId;
 
-use polkadot_primitives::v2::AuthorityDiscoveryId;
+use polkadot_primitives::AuthorityDiscoveryId;
 
 use super::{v1, IsRequest, Protocol};
 
-/// All requests that can be sent to the network bridge via `NetworkBridgeMessage::SendRequest`.
+/// All requests that can be sent to the network bridge via `NetworkBridgeTxMessage::SendRequest`.
 #[derive(Debug)]
 pub enum Requests {
 	/// Request an availability chunk from a node.
-	ChunkFetching(OutgoingRequest<v1::ChunkFetchingRequest>),
+	ChunkFetchingV1(OutgoingRequest<v1::ChunkFetchingRequest>),
 	/// Fetch a collation from a collator which previously announced it.
-	CollationFetching(OutgoingRequest<v1::CollationFetchingRequest>),
+	CollationFetchingV1(OutgoingRequest<v1::CollationFetchingRequest>),
 	/// Fetch a PoV from a validator which previously sent out a seconded statement.
-	PoVFetching(OutgoingRequest<v1::PoVFetchingRequest>),
+	PoVFetchingV1(OutgoingRequest<v1::PoVFetchingRequest>),
 	/// Request full available data from a node.
-	AvailableDataFetching(OutgoingRequest<v1::AvailableDataFetchingRequest>),
+	AvailableDataFetchingV1(OutgoingRequest<v1::AvailableDataFetchingRequest>),
 	/// Requests for fetching large statements as part of statement distribution.
-	StatementFetching(OutgoingRequest<v1::StatementFetchingRequest>),
+	StatementFetchingV1(OutgoingRequest<v1::StatementFetchingRequest>),
 	/// Requests for notifying about an ongoing dispute.
-	DisputeSending(OutgoingRequest<v1::DisputeRequest>),
+	DisputeSendingV1(OutgoingRequest<v1::DisputeRequest>),
 }
 
 impl Requests {
 	/// Get the protocol this request conforms to.
 	pub fn get_protocol(&self) -> Protocol {
 		match self {
-			Self::ChunkFetching(_) => Protocol::ChunkFetching,
-			Self::CollationFetching(_) => Protocol::CollationFetching,
-			Self::PoVFetching(_) => Protocol::PoVFetching,
-			Self::AvailableDataFetching(_) => Protocol::AvailableDataFetching,
-			Self::StatementFetching(_) => Protocol::StatementFetching,
-			Self::DisputeSending(_) => Protocol::DisputeSending,
+			Self::ChunkFetchingV1(_) => Protocol::ChunkFetchingV1,
+			Self::CollationFetchingV1(_) => Protocol::CollationFetchingV1,
+			Self::PoVFetchingV1(_) => Protocol::PoVFetchingV1,
+			Self::AvailableDataFetchingV1(_) => Protocol::AvailableDataFetchingV1,
+			Self::StatementFetchingV1(_) => Protocol::StatementFetchingV1,
+			Self::DisputeSendingV1(_) => Protocol::DisputeSendingV1,
 		}
 	}
 
@@ -64,12 +64,12 @@ impl Requests {
 	/// contained in the `enum`.
 	pub fn encode_request(self) -> (Protocol, OutgoingRequest<Vec<u8>>) {
 		match self {
-			Self::ChunkFetching(r) => r.encode_request(),
-			Self::CollationFetching(r) => r.encode_request(),
-			Self::PoVFetching(r) => r.encode_request(),
-			Self::AvailableDataFetching(r) => r.encode_request(),
-			Self::StatementFetching(r) => r.encode_request(),
-			Self::DisputeSending(r) => r.encode_request(),
+			Self::ChunkFetchingV1(r) => r.encode_request(),
+			Self::CollationFetchingV1(r) => r.encode_request(),
+			Self::PoVFetchingV1(r) => r.encode_request(),
+			Self::AvailableDataFetchingV1(r) => r.encode_request(),
+			Self::StatementFetchingV1(r) => r.encode_request(),
+			Self::DisputeSendingV1(r) => r.encode_request(),
 		}
 	}
 }

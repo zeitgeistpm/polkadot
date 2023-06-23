@@ -1,4 +1,4 @@
-// Copyright 2021 Parity Technologies (UK) Ltd.
+// Copyright (C) Parity Technologies (UK) Ltd.
 // This file is part of Polkadot.
 
 // Polkadot is free software: you can redistribute it and/or modify
@@ -19,8 +19,8 @@
 
 use polkadot_node_network_protocol::request_response::incoming;
 use polkadot_node_primitives::UncheckedSignedFullStatement;
+use polkadot_node_subsystem::errors::SubsystemError;
 use polkadot_node_subsystem_util::runtime;
-use polkadot_subsystem::errors::SubsystemError;
 
 use crate::LOG_TARGET;
 

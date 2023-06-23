@@ -1,4 +1,4 @@
-// Copyright 2020 Parity Technologies (UK) Ltd.
+// Copyright (C) Parity Technologies (UK) Ltd.
 // This file is part of Polkadot.
 
 // Polkadot is free software: you can redistribute it and/or modify
@@ -19,8 +19,6 @@
 use super::*;
 pub use polkadot_node_metrics::metrics::{self, prometheus, Metrics as MetricsTrait};
 
-use parity_util_mem::MemoryAllocationSnapshot;
-
 /// Overseer Prometheus metrics.
 #[derive(Clone)]
 struct MetricsInner {
@@ -31,6 +29,7 @@ struct MetricsInner {
 	to_subsystem_bounded_tof: prometheus::HistogramVec,
 	to_subsystem_bounded_sent: prometheus::GaugeVec<prometheus::U64>,
 	to_subsystem_bounded_received: prometheus::GaugeVec<prometheus::U64>,
+	to_subsystem_bounded_blocked: prometheus::GaugeVec<prometheus::U64>,
 
 	to_subsystem_unbounded_tof: prometheus::HistogramVec,
 	to_subsystem_unbounded_sent: prometheus::GaugeVec<prometheus::U64>,
@@ -39,7 +38,9 @@ struct MetricsInner {
 	signals_sent: prometheus::GaugeVec<prometheus::U64>,
 	signals_received: prometheus::GaugeVec<prometheus::U64>,
 
+	#[cfg(any(target_os = "linux", feature = "jemalloc-allocator"))]
 	memory_stats_resident: prometheus::Gauge<prometheus::U64>,
+	#[cfg(any(target_os = "linux", feature = "jemalloc-allocator"))]
 	memory_stats_allocated: prometheus::Gauge<prometheus::U64>,
 }
 
@@ -66,10 +67,14 @@ impl Metrics {
 		}
 	}
 
-	pub(crate) fn memory_stats_snapshot(&self, memory_stats: MemoryAllocationSnapshot) {
+	#[cfg(any(target_os = "linux", feature = "jemalloc-allocator"))]
+	pub(crate) fn memory_stats_snapshot(
+		&self,
+		memory_stats: memory_stats::MemoryAllocationSnapshot,
+	) {
 		if let Some(metrics) = &self.0 {
-			metrics.memory_stats_allocated.set(memory_stats.allocated);
-			metrics.memory_stats_resident.set(memory_stats.resident);
+			metrics.memory_stats_allocated.set(memory_stats.allocated as u64);
+			metrics.memory_stats_resident.set(memory_stats.resident as u64);
 		}
 	}
 
@@ -90,6 +95,11 @@ impl Metrics {
 						.to_subsystem_bounded_received
 						.with_label_values(&[name])
 						.set(readouts.bounded.received as u64);
+
+					metrics
+						.to_subsystem_bounded_blocked
+						.with_label_values(&[name])
+						.set(readouts.bounded.blocked as u64);
 
 					metrics
 						.to_subsystem_unbounded_sent
@@ -155,7 +165,11 @@ impl MetricsTrait for Metrics {
 					prometheus::HistogramOpts::new(
 						"polkadot_parachain_subsystem_bounded_tof",
 						"Duration spent in a particular channel from entrance to removal",
-					),
+					)
+					.buckets(vec![
+						0.0001, 0.0004, 0.0016, 0.0064, 0.0256, 0.1024, 0.4096, 1.6384, 3.2768,
+						4.9152, 6.5536,
+					]),
 					&["subsystem_name"],
 				)?,
 				registry,
@@ -180,12 +194,26 @@ impl MetricsTrait for Metrics {
 				)?,
 				registry,
 			)?,
+			to_subsystem_bounded_blocked: prometheus::register(
+				prometheus::GaugeVec::<prometheus::U64>::new(
+					prometheus::Opts::new(
+						"polkadot_parachain_subsystem_bounded_blocked",
+						"Number of times senders blocked while sending messages to a subsystem",
+					),
+					&["subsystem_name"],
+				)?,
+				registry,
+			)?,
 			to_subsystem_unbounded_tof: prometheus::register(
 				prometheus::HistogramVec::new(
 					prometheus::HistogramOpts::new(
 						"polkadot_parachain_subsystem_unbounded_tof",
 						"Duration spent in a particular channel from entrance to removal",
-					),
+					)
+					.buckets(vec![
+						0.0001, 0.0004, 0.0016, 0.0064, 0.0256, 0.1024, 0.4096, 1.6384, 3.2768,
+						4.9152, 6.5536,
+					]),
 					&["subsystem_name"],
 				)?,
 				registry,
@@ -230,7 +258,7 @@ impl MetricsTrait for Metrics {
 				)?,
 				registry,
 			)?,
-
+			#[cfg(any(target_os = "linux", feature = "jemalloc-allocator"))]
 			memory_stats_allocated: prometheus::register(
 				prometheus::Gauge::<prometheus::U64>::new(
 					"polkadot_memory_allocated",
@@ -238,6 +266,7 @@ impl MetricsTrait for Metrics {
 				)?,
 				registry,
 			)?,
+			#[cfg(any(target_os = "linux", feature = "jemalloc-allocator"))]
 			memory_stats_resident: prometheus::register(
 				prometheus::Gauge::<prometheus::U64>::new(
 					"polkadot_memory_resident",

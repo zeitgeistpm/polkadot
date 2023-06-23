@@ -1,4 +1,4 @@
-// Copyright 2017-2020 Parity Technologies (UK) Ltd.
+// Copyright (C) Parity Technologies (UK) Ltd.
 // This file is part of Polkadot.
 
 // Polkadot is free software: you can redistribute it and/or modify
@@ -24,7 +24,7 @@ use kusama_runtime as kusama;
 use kusama_runtime_constants::currency::UNITS as KSM;
 use pallet_im_online::sr25519::AuthorityId as ImOnlineId;
 use pallet_staking::Forcing;
-use polkadot_primitives::v2::{AccountId, AccountPublic, AssignmentId, ValidatorId};
+use polkadot_primitives::{AccountId, AccountPublic, AssignmentId, ValidatorId};
 #[cfg(feature = "polkadot-native")]
 use polkadot_runtime as polkadot;
 #[cfg(feature = "polkadot-native")]
@@ -54,6 +54,8 @@ const KUSAMA_STAGING_TELEMETRY_URL: &str = "wss://telemetry.polkadot.io/submit/"
 const WESTEND_STAGING_TELEMETRY_URL: &str = "wss://telemetry.polkadot.io/submit/";
 #[cfg(feature = "rococo-native")]
 const ROCOCO_STAGING_TELEMETRY_URL: &str = "wss://telemetry.polkadot.io/submit/";
+#[cfg(feature = "rococo-native")]
+const VERSI_STAGING_TELEMETRY_URL: &str = "wss://telemetry.polkadot.io/submit/";
 const DEFAULT_PROTOCOL_ID: &str = "dot";
 
 /// Node `ChainSpec` extensions.
@@ -64,9 +66,9 @@ const DEFAULT_PROTOCOL_ID: &str = "dot";
 #[serde(rename_all = "camelCase")]
 pub struct Extensions {
 	/// Block numbers with known hashes.
-	pub fork_blocks: sc_client_api::ForkBlocks<polkadot_primitives::v2::Block>,
+	pub fork_blocks: sc_client_api::ForkBlocks<polkadot_primitives::Block>,
 	/// Known bad block hashes.
-	pub bad_blocks: sc_client_api::BadBlocks<polkadot_primitives::v2::Block>,
+	pub bad_blocks: sc_client_api::BadBlocks<polkadot_primitives::Block>,
 	/// The light sync state.
 	///
 	/// This value will be set by the `sync-state rpc` implementation.
@@ -75,7 +77,7 @@ pub struct Extensions {
 
 /// The `ChainSpec` parameterized for the polkadot runtime.
 #[cfg(feature = "polkadot-native")]
-pub type PolkadotChainSpec = service::GenericChainSpec<polkadot::GenesisConfig, Extensions>;
+pub type PolkadotChainSpec = service::GenericChainSpec<polkadot::RuntimeGenesisConfig, Extensions>;
 
 // Dummy chain spec, in case when we don't have the native runtime.
 pub type DummyChainSpec = service::GenericChainSpec<(), Extensions>;
@@ -86,7 +88,7 @@ pub type PolkadotChainSpec = DummyChainSpec;
 
 /// The `ChainSpec` parameterized for the kusama runtime.
 #[cfg(feature = "kusama-native")]
-pub type KusamaChainSpec = service::GenericChainSpec<kusama::GenesisConfig, Extensions>;
+pub type KusamaChainSpec = service::GenericChainSpec<kusama::RuntimeGenesisConfig, Extensions>;
 
 /// The `ChainSpec` parameterized for the kusama runtime.
 // Dummy chain spec, but that is fine when we don't have the native runtime.
@@ -95,7 +97,7 @@ pub type KusamaChainSpec = DummyChainSpec;
 
 /// The `ChainSpec` parameterized for the westend runtime.
 #[cfg(feature = "westend-native")]
-pub type WestendChainSpec = service::GenericChainSpec<westend::GenesisConfig, Extensions>;
+pub type WestendChainSpec = service::GenericChainSpec<westend::RuntimeGenesisConfig, Extensions>;
 
 /// The `ChainSpec` parameterized for the westend runtime.
 // Dummy chain spec, but that is fine when we don't have the native runtime.
@@ -121,7 +123,7 @@ pub type RococoChainSpec = DummyChainSpec;
 #[cfg(feature = "rococo-native")]
 pub struct RococoGenesisExt {
 	/// The runtime genesis config.
-	runtime_genesis_config: rococo::GenesisConfig,
+	runtime_genesis_config: rococo::RuntimeGenesisConfig,
 	/// The session length in blocks.
 	///
 	/// If `None` is supplied, the default value is used.
@@ -141,28 +143,24 @@ impl sp_runtime::BuildStorage for RococoGenesisExt {
 }
 
 pub fn polkadot_config() -> Result<PolkadotChainSpec, String> {
-	PolkadotChainSpec::from_json_bytes(&include_bytes!("../res/polkadot.json")[..])
+	PolkadotChainSpec::from_json_bytes(&include_bytes!("../chain-specs/polkadot.json")[..])
 }
 
 pub fn kusama_config() -> Result<KusamaChainSpec, String> {
-	KusamaChainSpec::from_json_bytes(&include_bytes!("../res/kusama.json")[..])
+	KusamaChainSpec::from_json_bytes(&include_bytes!("../chain-specs/kusama.json")[..])
 }
 
 pub fn westend_config() -> Result<WestendChainSpec, String> {
-	WestendChainSpec::from_json_bytes(&include_bytes!("../res/westend.json")[..])
+	WestendChainSpec::from_json_bytes(&include_bytes!("../chain-specs/westend.json")[..])
 }
 
 pub fn rococo_config() -> Result<RococoChainSpec, String> {
-	RococoChainSpec::from_json_bytes(&include_bytes!("../res/rococo.json")[..])
-}
-
-pub fn versi_config() -> Result<VersiChainSpec, String> {
-	VersiChainSpec::from_json_bytes(&include_bytes!("../res/versi.json")[..])
+	RococoChainSpec::from_json_bytes(&include_bytes!("../chain-specs/rococo.json")[..])
 }
 
 /// This is a temporary testnet that uses the same runtime as rococo.
 pub fn wococo_config() -> Result<RococoChainSpec, String> {
-	RococoChainSpec::from_json_bytes(&include_bytes!("../res/wococo.json")[..])
+	RococoChainSpec::from_json_bytes(&include_bytes!("../chain-specs/wococo.json")[..])
 }
 
 /// The default parachains host configuration.
@@ -173,10 +171,9 @@ pub fn wococo_config() -> Result<RococoChainSpec, String> {
 	feature = "polkadot-native"
 ))]
 fn default_parachains_host_configuration(
-) -> polkadot_runtime_parachains::configuration::HostConfiguration<
-	polkadot_primitives::v2::BlockNumber,
-> {
-	use polkadot_primitives::v2::{MAX_CODE_SIZE, MAX_POV_SIZE};
+) -> polkadot_runtime_parachains::configuration::HostConfiguration<polkadot_primitives::BlockNumber>
+{
+	use polkadot_primitives::{MAX_CODE_SIZE, MAX_POV_SIZE};
 
 	polkadot_runtime_parachains::configuration::HostConfiguration {
 		validation_upgrade_cooldown: 2u32,
@@ -191,7 +188,6 @@ fn default_parachains_host_configuration(
 		max_upward_queue_count: 8,
 		max_upward_queue_size: 1024 * 1024,
 		max_downward_message_size: 1024 * 1024,
-		ump_service_total_weight: 100_000_000_000,
 		max_upward_message_size: 50 * 1024,
 		max_upward_message_num_per_candidate: 5,
 		hrmp_sender_deposit: 0,
@@ -305,7 +301,7 @@ fn rococo_session_keys(
 }
 
 #[cfg(feature = "polkadot-native")]
-fn polkadot_staging_testnet_config_genesis(wasm_binary: &[u8]) -> polkadot::GenesisConfig {
+fn polkadot_staging_testnet_config_genesis(wasm_binary: &[u8]) -> polkadot::RuntimeGenesisConfig {
 	// subkey inspect "$SECRET"
 	let endowed_accounts = vec![];
 
@@ -323,7 +319,7 @@ fn polkadot_staging_testnet_config_genesis(wasm_binary: &[u8]) -> polkadot::Gene
 	const ENDOWMENT: u128 = 1_000_000 * DOT;
 	const STASH: u128 = 100 * DOT;
 
-	polkadot::GenesisConfig {
+	polkadot::RuntimeGenesisConfig {
 		system: polkadot::SystemConfig { code: wasm_binary.to_vec() },
 		balances: polkadot::BalancesConfig {
 			balances: endowed_accounts
@@ -357,7 +353,7 @@ fn polkadot_staging_testnet_config_genesis(wasm_binary: &[u8]) -> polkadot::Gene
 			minimum_validator_count: 4,
 			stakers: initial_authorities
 				.iter()
-				.map(|x| (x.0.clone(), x.1.clone(), STASH, polkadot::StakerStatus::Validator))
+				.map(|x| (x.0.clone(), x.0.clone(), STASH, polkadot::StakerStatus::Validator))
 				.collect(),
 			invulnerables: initial_authorities.iter().map(|x| x.0.clone()).collect(),
 			force_era: Forcing::ForceNone,
@@ -388,11 +384,12 @@ fn polkadot_staging_testnet_config_genesis(wasm_binary: &[u8]) -> polkadot::Gene
 		},
 		paras: Default::default(),
 		xcm_pallet: Default::default(),
+		nomination_pools: Default::default(),
 	}
 }
 
 #[cfg(feature = "westend-native")]
-fn westend_staging_testnet_config_genesis(wasm_binary: &[u8]) -> westend::GenesisConfig {
+fn westend_staging_testnet_config_genesis(wasm_binary: &[u8]) -> westend::RuntimeGenesisConfig {
 	use hex_literal::hex;
 	use sp_core::crypto::UncheckedInto;
 
@@ -513,7 +510,7 @@ fn westend_staging_testnet_config_genesis(wasm_binary: &[u8]) -> westend::Genesi
 	const ENDOWMENT: u128 = 1_000_000 * WND;
 	const STASH: u128 = 100 * WND;
 
-	westend::GenesisConfig {
+	westend::RuntimeGenesisConfig {
 		system: westend::SystemConfig { code: wasm_binary.to_vec() },
 		balances: westend::BalancesConfig {
 			balances: endowed_accounts
@@ -547,7 +544,7 @@ fn westend_staging_testnet_config_genesis(wasm_binary: &[u8]) -> westend::Genesi
 			minimum_validator_count: 4,
 			stakers: initial_authorities
 				.iter()
-				.map(|x| (x.0.clone(), x.1.clone(), STASH, westend::StakerStatus::Validator))
+				.map(|x| (x.0.clone(), x.0.clone(), STASH, westend::StakerStatus::Validator))
 				.collect(),
 			invulnerables: initial_authorities.iter().map(|x| x.0.clone()).collect(),
 			force_era: Forcing::ForceNone,
@@ -569,14 +566,15 @@ fn westend_staging_testnet_config_genesis(wasm_binary: &[u8]) -> westend::Genesi
 		},
 		paras: Default::default(),
 		registrar: westend_runtime::RegistrarConfig {
-			next_free_para_id: polkadot_primitives::v2::LOWEST_PUBLIC_ID,
+			next_free_para_id: polkadot_primitives::LOWEST_PUBLIC_ID,
 		},
 		xcm_pallet: Default::default(),
+		nomination_pools: Default::default(),
 	}
 }
 
 #[cfg(feature = "kusama-native")]
-fn kusama_staging_testnet_config_genesis(wasm_binary: &[u8]) -> kusama::GenesisConfig {
+fn kusama_staging_testnet_config_genesis(wasm_binary: &[u8]) -> kusama::RuntimeGenesisConfig {
 	use hex_literal::hex;
 	use sp_core::crypto::UncheckedInto;
 
@@ -702,7 +700,7 @@ fn kusama_staging_testnet_config_genesis(wasm_binary: &[u8]) -> kusama::GenesisC
 	const ENDOWMENT: u128 = 1_000_000 * KSM;
 	const STASH: u128 = 100 * KSM;
 
-	kusama::GenesisConfig {
+	kusama::RuntimeGenesisConfig {
 		system: kusama::SystemConfig { code: wasm_binary.to_vec() },
 		balances: kusama::BalancesConfig {
 			balances: endowed_accounts
@@ -736,21 +734,13 @@ fn kusama_staging_testnet_config_genesis(wasm_binary: &[u8]) -> kusama::GenesisC
 			minimum_validator_count: 4,
 			stakers: initial_authorities
 				.iter()
-				.map(|x| (x.0.clone(), x.1.clone(), STASH, kusama::StakerStatus::Validator))
+				.map(|x| (x.0.clone(), x.0.clone(), STASH, kusama::StakerStatus::Validator))
 				.collect(),
 			invulnerables: initial_authorities.iter().map(|x| x.0.clone()).collect(),
 			force_era: Forcing::ForceNone,
 			slash_reward_fraction: Perbill::from_percent(10),
 			..Default::default()
 		},
-		phragmen_election: Default::default(),
-		democracy: Default::default(),
-		council: kusama::CouncilConfig { members: vec![], phantom: Default::default() },
-		technical_committee: kusama::TechnicalCommitteeConfig {
-			members: vec![],
-			phantom: Default::default(),
-		},
-		technical_membership: Default::default(),
 		babe: kusama::BabeConfig {
 			authorities: Default::default(),
 			epoch_config: Some(kusama::BABE_GENESIS_EPOCH_CONFIG),
@@ -765,14 +755,17 @@ fn kusama_staging_testnet_config_genesis(wasm_binary: &[u8]) -> kusama::GenesisC
 		configuration: kusama::ConfigurationConfig {
 			config: default_parachains_host_configuration(),
 		},
-		gilt: Default::default(),
 		paras: Default::default(),
 		xcm_pallet: Default::default(),
+		nomination_pools: Default::default(),
+		nis_counterpart_balances: Default::default(),
 	}
 }
 
 #[cfg(feature = "rococo-native")]
-fn rococo_staging_testnet_config_genesis(wasm_binary: &[u8]) -> rococo_runtime::GenesisConfig {
+fn rococo_staging_testnet_config_genesis(
+	wasm_binary: &[u8],
+) -> rococo_runtime::RuntimeGenesisConfig {
 	use hex_literal::hex;
 	use sp_core::crypto::UncheckedInto;
 
@@ -1015,7 +1008,7 @@ fn rococo_staging_testnet_config_genesis(wasm_binary: &[u8]) -> rococo_runtime::
 	const ENDOWMENT: u128 = 1_000_000 * ROC;
 	const STASH: u128 = 100 * ROC;
 
-	rococo_runtime::GenesisConfig {
+	rococo_runtime::RuntimeGenesisConfig {
 		system: rococo_runtime::SystemConfig { code: wasm_binary.to_vec() },
 		balances: rococo_runtime::BalancesConfig {
 			balances: endowed_accounts
@@ -1046,15 +1039,24 @@ fn rococo_staging_testnet_config_genesis(wasm_binary: &[u8]) -> rococo_runtime::
 				})
 				.collect::<Vec<_>>(),
 		},
+		phragmen_election: Default::default(),
 		babe: rococo_runtime::BabeConfig {
 			authorities: Default::default(),
 			epoch_config: Some(rococo_runtime::BABE_GENESIS_EPOCH_CONFIG),
 		},
 		grandpa: Default::default(),
 		im_online: Default::default(),
-		collective: Default::default(),
-		membership: Default::default(),
+		democracy: rococo_runtime::DemocracyConfig::default(),
+		council: rococo::CouncilConfig { members: vec![], phantom: Default::default() },
+		technical_committee: rococo::TechnicalCommitteeConfig {
+			members: vec![],
+			phantom: Default::default(),
+		},
+		technical_membership: Default::default(),
+		treasury: Default::default(),
 		authority_discovery: rococo_runtime::AuthorityDiscoveryConfig { keys: vec![] },
+		claims: rococo::ClaimsConfig { claims: vec![], vesting: vec![] },
+		vesting: rococo::VestingConfig { vesting: vec![] },
 		sudo: rococo_runtime::SudoConfig { key: Some(endowed_accounts[0].clone()) },
 		paras: rococo_runtime::ParasConfig { paras: vec![] },
 		hrmp: Default::default(),
@@ -1062,27 +1064,21 @@ fn rococo_staging_testnet_config_genesis(wasm_binary: &[u8]) -> rococo_runtime::
 			config: default_parachains_host_configuration(),
 		},
 		registrar: rococo_runtime::RegistrarConfig {
-			next_free_para_id: polkadot_primitives::v2::LOWEST_PUBLIC_ID,
+			next_free_para_id: polkadot_primitives::LOWEST_PUBLIC_ID,
 		},
 		xcm_pallet: Default::default(),
-		transaction_payment: Default::default(),
-		bridge_rococo_grandpa: rococo_runtime::BridgeRococoGrandpaConfig {
-			owner: Some(endowed_accounts[0].clone()),
-			..Default::default()
-		},
-		bridge_wococo_grandpa: rococo_runtime::BridgeWococoGrandpaConfig {
-			owner: Some(endowed_accounts[0].clone()),
-			..Default::default()
-		},
-		bridge_rococo_messages: rococo_runtime::BridgeRococoMessagesConfig {
-			owner: Some(endowed_accounts[0].clone()),
-			..Default::default()
-		},
-		bridge_wococo_messages: rococo_runtime::BridgeWococoMessagesConfig {
-			owner: Some(endowed_accounts[0].clone()),
-			..Default::default()
-		},
+		nis_counterpart_balances: Default::default(),
 	}
+}
+
+/// Returns the properties for the [`PolkadotChainSpec`].
+pub fn polkadot_chain_spec_properties() -> serde_json::map::Map<String, serde_json::Value> {
+	serde_json::json!({
+		"tokenDecimals": 10,
+	})
+	.as_object()
+	.expect("Map given; qed")
+	.clone()
 }
 
 /// Polkadot staging testnet config.
@@ -1103,7 +1099,7 @@ pub fn polkadot_staging_testnet_config() -> Result<PolkadotChainSpec, String> {
 		),
 		Some(DEFAULT_PROTOCOL_ID),
 		None,
-		None,
+		Some(polkadot_chain_spec_properties()),
 		Default::default(),
 	))
 }
@@ -1176,6 +1172,43 @@ pub fn rococo_staging_testnet_config() -> Result<RococoChainSpec, String> {
 		Some(DEFAULT_PROTOCOL_ID),
 		None,
 		None,
+		Default::default(),
+	))
+}
+
+pub fn versi_chain_spec_properties() -> serde_json::map::Map<String, serde_json::Value> {
+	serde_json::json!({
+		"ss58Format": 42,
+		"tokenDecimals": 12,
+		"tokenSymbol": "VRS",
+	})
+	.as_object()
+	.expect("Map given; qed")
+	.clone()
+}
+
+/// Versi staging testnet config.
+#[cfg(feature = "rococo-native")]
+pub fn versi_staging_testnet_config() -> Result<RococoChainSpec, String> {
+	let wasm_binary = rococo::WASM_BINARY.ok_or("Versi development wasm not available")?;
+	let boot_nodes = vec![];
+
+	Ok(RococoChainSpec::from_genesis(
+		"Versi Staging Testnet",
+		"versi_staging_testnet",
+		ChainType::Live,
+		move || RococoGenesisExt {
+			runtime_genesis_config: rococo_staging_testnet_config_genesis(wasm_binary),
+			session_length_in_blocks: Some(100),
+		},
+		boot_nodes,
+		Some(
+			TelemetryEndpoints::new(vec![(VERSI_STAGING_TELEMETRY_URL.to_string(), 0)])
+				.expect("Versi Staging telemetry url is valid; qed"),
+		),
+		Some("versi"),
+		None,
+		Some(versi_chain_spec_properties()),
 		Default::default(),
 	))
 }
@@ -1255,7 +1288,7 @@ fn testnet_accounts() -> Vec<AccountId> {
 	]
 }
 
-/// Helper function to create polkadot `GenesisConfig` for testing
+/// Helper function to create polkadot `RuntimeGenesisConfig` for testing
 #[cfg(feature = "polkadot-native")]
 pub fn polkadot_testnet_genesis(
 	wasm_binary: &[u8],
@@ -1271,13 +1304,13 @@ pub fn polkadot_testnet_genesis(
 	)>,
 	_root_key: AccountId,
 	endowed_accounts: Option<Vec<AccountId>>,
-) -> polkadot::GenesisConfig {
+) -> polkadot::RuntimeGenesisConfig {
 	let endowed_accounts: Vec<AccountId> = endowed_accounts.unwrap_or_else(testnet_accounts);
 
 	const ENDOWMENT: u128 = 1_000_000 * DOT;
 	const STASH: u128 = 100 * DOT;
 
-	polkadot::GenesisConfig {
+	polkadot::RuntimeGenesisConfig {
 		system: polkadot::SystemConfig { code: wasm_binary.to_vec() },
 		indices: polkadot::IndicesConfig { indices: vec![] },
 		balances: polkadot::BalancesConfig {
@@ -1307,7 +1340,7 @@ pub fn polkadot_testnet_genesis(
 			validator_count: initial_authorities.len() as u32,
 			stakers: initial_authorities
 				.iter()
-				.map(|x| (x.0.clone(), x.1.clone(), STASH, polkadot::StakerStatus::Validator))
+				.map(|x| (x.0.clone(), x.0.clone(), STASH, polkadot::StakerStatus::Validator))
 				.collect(),
 			invulnerables: initial_authorities.iter().map(|x| x.0.clone()).collect(),
 			force_era: Forcing::NotForcing,
@@ -1338,10 +1371,11 @@ pub fn polkadot_testnet_genesis(
 		},
 		paras: Default::default(),
 		xcm_pallet: Default::default(),
+		nomination_pools: Default::default(),
 	}
 }
 
-/// Helper function to create kusama `GenesisConfig` for testing
+/// Helper function to create kusama `RuntimeGenesisConfig` for testing
 #[cfg(feature = "kusama-native")]
 pub fn kusama_testnet_genesis(
 	wasm_binary: &[u8],
@@ -1357,13 +1391,13 @@ pub fn kusama_testnet_genesis(
 	)>,
 	_root_key: AccountId,
 	endowed_accounts: Option<Vec<AccountId>>,
-) -> kusama::GenesisConfig {
+) -> kusama::RuntimeGenesisConfig {
 	let endowed_accounts: Vec<AccountId> = endowed_accounts.unwrap_or_else(testnet_accounts);
 
 	const ENDOWMENT: u128 = 1_000_000 * KSM;
 	const STASH: u128 = 100 * KSM;
 
-	kusama::GenesisConfig {
+	kusama::RuntimeGenesisConfig {
 		system: kusama::SystemConfig { code: wasm_binary.to_vec() },
 		indices: kusama::IndicesConfig { indices: vec![] },
 		balances: kusama::BalancesConfig {
@@ -1393,21 +1427,13 @@ pub fn kusama_testnet_genesis(
 			validator_count: initial_authorities.len() as u32,
 			stakers: initial_authorities
 				.iter()
-				.map(|x| (x.0.clone(), x.1.clone(), STASH, kusama::StakerStatus::Validator))
+				.map(|x| (x.0.clone(), x.0.clone(), STASH, kusama::StakerStatus::Validator))
 				.collect(),
 			invulnerables: initial_authorities.iter().map(|x| x.0.clone()).collect(),
 			force_era: Forcing::NotForcing,
 			slash_reward_fraction: Perbill::from_percent(10),
 			..Default::default()
 		},
-		phragmen_election: Default::default(),
-		democracy: kusama::DemocracyConfig::default(),
-		council: kusama::CouncilConfig { members: vec![], phantom: Default::default() },
-		technical_committee: kusama::TechnicalCommitteeConfig {
-			members: vec![],
-			phantom: Default::default(),
-		},
-		technical_membership: Default::default(),
 		babe: kusama::BabeConfig {
 			authorities: Default::default(),
 			epoch_config: Some(kusama::BABE_GENESIS_EPOCH_CONFIG),
@@ -1422,13 +1448,14 @@ pub fn kusama_testnet_genesis(
 		configuration: kusama::ConfigurationConfig {
 			config: default_parachains_host_configuration(),
 		},
-		gilt: Default::default(),
 		paras: Default::default(),
 		xcm_pallet: Default::default(),
+		nomination_pools: Default::default(),
+		nis_counterpart_balances: Default::default(),
 	}
 }
 
-/// Helper function to create westend `GenesisConfig` for testing
+/// Helper function to create westend `RuntimeGenesisConfig` for testing
 #[cfg(feature = "westend-native")]
 pub fn westend_testnet_genesis(
 	wasm_binary: &[u8],
@@ -1444,13 +1471,13 @@ pub fn westend_testnet_genesis(
 	)>,
 	root_key: AccountId,
 	endowed_accounts: Option<Vec<AccountId>>,
-) -> westend::GenesisConfig {
+) -> westend::RuntimeGenesisConfig {
 	let endowed_accounts: Vec<AccountId> = endowed_accounts.unwrap_or_else(testnet_accounts);
 
 	const ENDOWMENT: u128 = 1_000_000 * WND;
 	const STASH: u128 = 100 * WND;
 
-	westend::GenesisConfig {
+	westend::RuntimeGenesisConfig {
 		system: westend::SystemConfig { code: wasm_binary.to_vec() },
 		indices: westend::IndicesConfig { indices: vec![] },
 		balances: westend::BalancesConfig {
@@ -1480,7 +1507,7 @@ pub fn westend_testnet_genesis(
 			validator_count: initial_authorities.len() as u32,
 			stakers: initial_authorities
 				.iter()
-				.map(|x| (x.0.clone(), x.1.clone(), STASH, westend::StakerStatus::Validator))
+				.map(|x| (x.0.clone(), x.0.clone(), STASH, westend::StakerStatus::Validator))
 				.collect(),
 			invulnerables: initial_authorities.iter().map(|x| x.0.clone()).collect(),
 			force_era: Forcing::NotForcing,
@@ -1502,13 +1529,14 @@ pub fn westend_testnet_genesis(
 		},
 		paras: Default::default(),
 		registrar: westend_runtime::RegistrarConfig {
-			next_free_para_id: polkadot_primitives::v2::LOWEST_PUBLIC_ID,
+			next_free_para_id: polkadot_primitives::LOWEST_PUBLIC_ID,
 		},
 		xcm_pallet: Default::default(),
+		nomination_pools: Default::default(),
 	}
 }
 
-/// Helper function to create rococo `GenesisConfig` for testing
+/// Helper function to create rococo `RuntimeGenesisConfig` for testing
 #[cfg(feature = "rococo-native")]
 pub fn rococo_testnet_genesis(
 	wasm_binary: &[u8],
@@ -1525,12 +1553,12 @@ pub fn rococo_testnet_genesis(
 	)>,
 	root_key: AccountId,
 	endowed_accounts: Option<Vec<AccountId>>,
-) -> rococo_runtime::GenesisConfig {
+) -> rococo_runtime::RuntimeGenesisConfig {
 	let endowed_accounts: Vec<AccountId> = endowed_accounts.unwrap_or_else(testnet_accounts);
 
 	const ENDOWMENT: u128 = 1_000_000 * ROC;
 
-	rococo_runtime::GenesisConfig {
+	rococo_runtime::RuntimeGenesisConfig {
 		system: rococo_runtime::SystemConfig { code: wasm_binary.to_vec() },
 		beefy: Default::default(),
 		indices: rococo_runtime::IndicesConfig { indices: vec![] },
@@ -1563,8 +1591,17 @@ pub fn rococo_testnet_genesis(
 		},
 		grandpa: Default::default(),
 		im_online: Default::default(),
-		collective: Default::default(),
-		membership: Default::default(),
+		phragmen_election: Default::default(),
+		democracy: rococo::DemocracyConfig::default(),
+		council: rococo::CouncilConfig { members: vec![], phantom: Default::default() },
+		technical_committee: rococo::TechnicalCommitteeConfig {
+			members: vec![],
+			phantom: Default::default(),
+		},
+		technical_membership: Default::default(),
+		treasury: Default::default(),
+		claims: rococo::ClaimsConfig { claims: vec![], vesting: vec![] },
+		vesting: rococo::VestingConfig { vesting: vec![] },
 		authority_discovery: rococo_runtime::AuthorityDiscoveryConfig { keys: vec![] },
 		sudo: rococo_runtime::SudoConfig { key: Some(root_key.clone()) },
 		hrmp: Default::default(),
@@ -1576,31 +1613,15 @@ pub fn rococo_testnet_genesis(
 		},
 		paras: rococo_runtime::ParasConfig { paras: vec![] },
 		registrar: rococo_runtime::RegistrarConfig {
-			next_free_para_id: polkadot_primitives::v2::LOWEST_PUBLIC_ID,
+			next_free_para_id: polkadot_primitives::LOWEST_PUBLIC_ID,
 		},
 		xcm_pallet: Default::default(),
-		transaction_payment: Default::default(),
-		bridge_rococo_grandpa: rococo_runtime::BridgeRococoGrandpaConfig {
-			owner: Some(root_key.clone()),
-			..Default::default()
-		},
-		bridge_wococo_grandpa: rococo_runtime::BridgeWococoGrandpaConfig {
-			owner: Some(root_key.clone()),
-			..Default::default()
-		},
-		bridge_rococo_messages: rococo_runtime::BridgeRococoMessagesConfig {
-			owner: Some(root_key.clone()),
-			..Default::default()
-		},
-		bridge_wococo_messages: rococo_runtime::BridgeWococoMessagesConfig {
-			owner: Some(root_key.clone()),
-			..Default::default()
-		},
+		nis_counterpart_balances: Default::default(),
 	}
 }
 
 #[cfg(feature = "polkadot-native")]
-fn polkadot_development_config_genesis(wasm_binary: &[u8]) -> polkadot::GenesisConfig {
+fn polkadot_development_config_genesis(wasm_binary: &[u8]) -> polkadot::RuntimeGenesisConfig {
 	polkadot_testnet_genesis(
 		wasm_binary,
 		vec![get_authority_keys_from_seed_no_beefy("Alice")],
@@ -1610,7 +1631,7 @@ fn polkadot_development_config_genesis(wasm_binary: &[u8]) -> polkadot::GenesisC
 }
 
 #[cfg(feature = "kusama-native")]
-fn kusama_development_config_genesis(wasm_binary: &[u8]) -> kusama::GenesisConfig {
+fn kusama_development_config_genesis(wasm_binary: &[u8]) -> kusama::RuntimeGenesisConfig {
 	kusama_testnet_genesis(
 		wasm_binary,
 		vec![get_authority_keys_from_seed_no_beefy("Alice")],
@@ -1620,7 +1641,7 @@ fn kusama_development_config_genesis(wasm_binary: &[u8]) -> kusama::GenesisConfi
 }
 
 #[cfg(feature = "westend-native")]
-fn westend_development_config_genesis(wasm_binary: &[u8]) -> westend::GenesisConfig {
+fn westend_development_config_genesis(wasm_binary: &[u8]) -> westend::RuntimeGenesisConfig {
 	westend_testnet_genesis(
 		wasm_binary,
 		vec![get_authority_keys_from_seed_no_beefy("Alice")],
@@ -1630,7 +1651,7 @@ fn westend_development_config_genesis(wasm_binary: &[u8]) -> westend::GenesisCon
 }
 
 #[cfg(feature = "rococo-native")]
-fn rococo_development_config_genesis(wasm_binary: &[u8]) -> rococo_runtime::GenesisConfig {
+fn rococo_development_config_genesis(wasm_binary: &[u8]) -> rococo_runtime::RuntimeGenesisConfig {
 	rococo_testnet_genesis(
 		wasm_binary,
 		vec![get_authority_keys_from_seed("Alice")],
@@ -1653,7 +1674,7 @@ pub fn polkadot_development_config() -> Result<PolkadotChainSpec, String> {
 		None,
 		Some(DEFAULT_PROTOCOL_ID),
 		None,
-		None,
+		Some(polkadot_chain_spec_properties()),
 		Default::default(),
 	))
 }
@@ -1767,7 +1788,7 @@ pub fn wococo_development_config() -> Result<RococoChainSpec, String> {
 }
 
 #[cfg(feature = "polkadot-native")]
-fn polkadot_local_testnet_genesis(wasm_binary: &[u8]) -> polkadot::GenesisConfig {
+fn polkadot_local_testnet_genesis(wasm_binary: &[u8]) -> polkadot::RuntimeGenesisConfig {
 	polkadot_testnet_genesis(
 		wasm_binary,
 		vec![
@@ -1793,13 +1814,13 @@ pub fn polkadot_local_testnet_config() -> Result<PolkadotChainSpec, String> {
 		None,
 		Some(DEFAULT_PROTOCOL_ID),
 		None,
-		None,
+		Some(polkadot_chain_spec_properties()),
 		Default::default(),
 	))
 }
 
 #[cfg(feature = "kusama-native")]
-fn kusama_local_testnet_genesis(wasm_binary: &[u8]) -> kusama::GenesisConfig {
+fn kusama_local_testnet_genesis(wasm_binary: &[u8]) -> kusama::RuntimeGenesisConfig {
 	kusama_testnet_genesis(
 		wasm_binary,
 		vec![
@@ -1831,7 +1852,7 @@ pub fn kusama_local_testnet_config() -> Result<KusamaChainSpec, String> {
 }
 
 #[cfg(feature = "westend-native")]
-fn westend_local_testnet_genesis(wasm_binary: &[u8]) -> westend::GenesisConfig {
+fn westend_local_testnet_genesis(wasm_binary: &[u8]) -> westend::RuntimeGenesisConfig {
 	westend_testnet_genesis(
 		wasm_binary,
 		vec![
@@ -1863,7 +1884,7 @@ pub fn westend_local_testnet_config() -> Result<WestendChainSpec, String> {
 }
 
 #[cfg(feature = "rococo-native")]
-fn rococo_local_testnet_genesis(wasm_binary: &[u8]) -> rococo_runtime::GenesisConfig {
+fn rococo_local_testnet_genesis(wasm_binary: &[u8]) -> rococo_runtime::RuntimeGenesisConfig {
 	rococo_testnet_genesis(
 		wasm_binary,
 		vec![get_authority_keys_from_seed("Alice"), get_authority_keys_from_seed("Bob")],
@@ -1897,23 +1918,7 @@ pub fn rococo_local_testnet_config() -> Result<RococoChainSpec, String> {
 
 /// Wococo is a temporary testnet that uses almost the same runtime as rococo.
 #[cfg(feature = "rococo-native")]
-fn wococo_local_testnet_genesis(wasm_binary: &[u8]) -> rococo_runtime::GenesisConfig {
-	rococo_testnet_genesis(
-		wasm_binary,
-		vec![
-			get_authority_keys_from_seed("Alice"),
-			get_authority_keys_from_seed("Bob"),
-			get_authority_keys_from_seed("Charlie"),
-			get_authority_keys_from_seed("Dave"),
-		],
-		get_account_id_from_seed::<sr25519::Public>("Alice"),
-		None,
-	)
-}
-
-/// `Versi` is a temporary testnet that uses the same runtime as rococo.
-#[cfg(feature = "rococo-native")]
-fn versi_local_testnet_genesis(wasm_binary: &[u8]) -> rococo_runtime::GenesisConfig {
+fn wococo_local_testnet_genesis(wasm_binary: &[u8]) -> rococo_runtime::RuntimeGenesisConfig {
 	rococo_testnet_genesis(
 		wasm_binary,
 		vec![
@@ -1950,6 +1955,22 @@ pub fn wococo_local_testnet_config() -> Result<RococoChainSpec, String> {
 	))
 }
 
+/// `Versi` is a temporary testnet that uses the same runtime as rococo.
+#[cfg(feature = "rococo-native")]
+fn versi_local_testnet_genesis(wasm_binary: &[u8]) -> rococo_runtime::RuntimeGenesisConfig {
+	rococo_testnet_genesis(
+		wasm_binary,
+		vec![
+			get_authority_keys_from_seed("Alice"),
+			get_authority_keys_from_seed("Bob"),
+			get_authority_keys_from_seed("Charlie"),
+			get_authority_keys_from_seed("Dave"),
+		],
+		get_account_id_from_seed::<sr25519::Public>("Alice"),
+		None,
+	)
+}
+
 /// `Versi` local testnet config (multivalidator Alice + Bob + Charlie + Dave)
 #[cfg(feature = "rococo-native")]
 pub fn versi_local_testnet_config() -> Result<RococoChainSpec, String> {
@@ -1966,7 +1987,7 @@ pub fn versi_local_testnet_config() -> Result<RococoChainSpec, String> {
 		},
 		vec![],
 		None,
-		Some(DEFAULT_PROTOCOL_ID),
+		Some("versi"),
 		None,
 		None,
 		Default::default(),

@@ -1,4 +1,4 @@
-// Copyright 2021 Parity Technologies (UK) Ltd.
+// Copyright (C) Parity Technologies (UK) Ltd.
 // This file is part of Polkadot.
 
 // Polkadot is free software: you can redistribute it and/or modify
@@ -16,25 +16,28 @@
 
 //! Convenient interface to runtime information.
 
-use std::cmp::max;
+use std::num::NonZeroUsize;
 
 use lru::LruCache;
 
 use parity_scale_codec::Encode;
-use sp_application_crypto::AppKey;
+use sp_application_crypto::AppCrypto;
 use sp_core::crypto::ByteArray;
-use sp_keystore::{CryptoStore, SyncCryptoStorePtr};
+use sp_keystore::{Keystore, KeystorePtr};
 
-use polkadot_node_subsystem::{SubsystemContext, SubsystemSender};
-use polkadot_primitives::v2::{
-	CandidateEvent, CoreState, EncodeAs, GroupIndex, GroupRotationInfo, Hash, OccupiedCore,
-	SessionIndex, SessionInfo, Signed, SigningContext, UncheckedSigned, ValidationCode,
-	ValidationCodeHash, ValidatorId, ValidatorIndex,
+use polkadot_node_subsystem::{messages::RuntimeApiMessage, overseer, SubsystemSender};
+use polkadot_primitives::{
+	vstaging, CandidateEvent, CandidateHash, CoreState, EncodeAs, GroupIndex, GroupRotationInfo,
+	Hash, IndexedVec, OccupiedCore, ScrapedOnChainVotes, SessionIndex, SessionInfo, Signed,
+	SigningContext, UncheckedSigned, ValidationCode, ValidationCodeHash, ValidatorId,
+	ValidatorIndex,
 };
 
 use crate::{
-	request_availability_cores, request_candidate_events, request_session_index_for_child,
-	request_session_info, request_validation_code_by_hash, request_validator_groups,
+	request_availability_cores, request_candidate_events, request_key_ownership_proof,
+	request_on_chain_votes, request_session_index_for_child, request_session_info,
+	request_submit_report_dispute_lost, request_unapplied_slashes, request_validation_code_by_hash,
+	request_validator_groups,
 };
 
 /// Errors that can happen on runtime fetches.
@@ -48,10 +51,10 @@ pub struct Config {
 	/// Needed for retrieval of `ValidatorInfo`
 	///
 	/// Pass `None` if you are not interested.
-	pub keystore: Option<SyncCryptoStorePtr>,
+	pub keystore: Option<KeystorePtr>,
 
 	/// How many sessions should we keep in the cache?
-	pub session_cache_lru_size: usize,
+	pub session_cache_lru_size: NonZeroUsize,
 }
 
 /// Caching of session info.
@@ -68,7 +71,7 @@ pub struct RuntimeInfo {
 	session_info_cache: LruCache<SessionIndex, ExtendedSessionInfo>,
 
 	/// Key store for determining whether we are a validator and what `ValidatorIndex` we have.
-	keystore: Option<SyncCryptoStorePtr>,
+	keystore: Option<KeystorePtr>,
 }
 
 /// `SessionInfo` with additional useful data for validator nodes.
@@ -94,21 +97,24 @@ impl Default for Config {
 		Self {
 			keystore: None,
 			// Usually we need to cache the current and the last session.
-			session_cache_lru_size: 2,
+			session_cache_lru_size: NonZeroUsize::new(2).expect("2 is larger than 0; qed"),
 		}
 	}
 }
 
 impl RuntimeInfo {
 	/// Create a new `RuntimeInfo` for convenient runtime fetches.
-	pub fn new(keystore: Option<SyncCryptoStorePtr>) -> Self {
+	pub fn new(keystore: Option<KeystorePtr>) -> Self {
 		Self::new_with_config(Config { keystore, ..Default::default() })
 	}
 
 	/// Create with more elaborate configuration options.
 	pub fn new_with_config(cfg: Config) -> Self {
 		Self {
-			session_index_cache: LruCache::new(max(10, cfg.session_cache_lru_size)),
+			session_index_cache: LruCache::new(
+				cfg.session_cache_lru_size
+					.max(NonZeroUsize::new(10).expect("10 is larger than 0; qed")),
+			),
 			session_info_cache: LruCache::new(cfg.session_cache_lru_size),
 			keystore: cfg.keystore,
 		}
@@ -122,7 +128,7 @@ impl RuntimeInfo {
 		parent: Hash,
 	) -> Result<SessionIndex>
 	where
-		Sender: SubsystemSender,
+		Sender: SubsystemSender<RuntimeApiMessage>,
 	{
 		match self.session_index_cache.get(&parent) {
 			Some(index) => Ok(*index),
@@ -142,7 +148,7 @@ impl RuntimeInfo {
 		relay_parent: Hash,
 	) -> Result<&'a ExtendedSessionInfo>
 	where
-		Sender: SubsystemSender,
+		Sender: SubsystemSender<RuntimeApiMessage>,
 	{
 		let session_index = self.get_session_index_for_child(sender, relay_parent).await?;
 
@@ -160,14 +166,14 @@ impl RuntimeInfo {
 		session_index: SessionIndex,
 	) -> Result<&'a ExtendedSessionInfo>
 	where
-		Sender: SubsystemSender,
+		Sender: SubsystemSender<RuntimeApiMessage>,
 	{
 		if !self.session_info_cache.contains(&session_index) {
 			let session_info =
 				recv_runtime(request_session_info(parent, session_index, sender).await)
 					.await?
 					.ok_or(JfyiError::NoSuchSession(session_index))?;
-			let validator_info = self.get_validator_info(&session_info).await?;
+			let validator_info = self.get_validator_info(&session_info)?;
 
 			let full_info = ExtendedSessionInfo { session_info, validator_info };
 
@@ -189,7 +195,7 @@ impl RuntimeInfo {
 		std::result::Result<Signed<Payload, RealPayload>, UncheckedSigned<Payload, RealPayload>>,
 	>
 	where
-		Sender: SubsystemSender,
+		Sender: SubsystemSender<RuntimeApiMessage>,
 		Payload: EncodeAs<RealPayload> + Clone,
 		RealPayload: Encode + Clone,
 	{
@@ -202,8 +208,8 @@ impl RuntimeInfo {
 	///
 	///
 	/// Returns: `None` if not a parachain validator.
-	async fn get_validator_info(&self, session_info: &SessionInfo) -> Result<ValidatorInfo> {
-		if let Some(our_index) = self.get_our_index(&session_info.validators).await {
+	fn get_validator_info(&self, session_info: &SessionInfo) -> Result<ValidatorInfo> {
+		if let Some(our_index) = self.get_our_index(&session_info.validators) {
 			// Get our group index:
 			let our_group =
 				session_info.validator_groups.iter().enumerate().find_map(|(i, g)| {
@@ -224,10 +230,13 @@ impl RuntimeInfo {
 	/// Get our `ValidatorIndex`.
 	///
 	/// Returns: None if we are not a validator.
-	async fn get_our_index(&self, validators: &[ValidatorId]) -> Option<ValidatorIndex> {
+	fn get_our_index(
+		&self,
+		validators: &IndexedVec<ValidatorIndex, ValidatorId>,
+	) -> Option<ValidatorIndex> {
 		let keystore = self.keystore.as_ref()?;
 		for (i, v) in validators.iter().enumerate() {
-			if CryptoStore::has_keys(&**keystore, &[(v.to_raw_vec(), ValidatorId::ID)]).await {
+			if Keystore::has_keys(&**keystore, &[(v.to_raw_vec(), ValidatorId::ID)]) {
 				return Some(ValidatorIndex(i as u32))
 			}
 		}
@@ -250,31 +259,31 @@ where
 
 	session_info
 		.validators
-		.get(signed.unchecked_validator_index().0 as usize)
+		.get(signed.unchecked_validator_index())
 		.ok_or_else(|| signed.clone())
 		.and_then(|v| signed.try_into_checked(&signing_context, v))
 }
 
 /// Request availability cores from the runtime.
-pub async fn get_availability_cores<Context>(
-	ctx: &mut Context,
+pub async fn get_availability_cores<Sender>(
+	sender: &mut Sender,
 	relay_parent: Hash,
 ) -> Result<Vec<CoreState>>
 where
-	Context: SubsystemContext,
+	Sender: overseer::SubsystemSender<RuntimeApiMessage>,
 {
-	recv_runtime(request_availability_cores(relay_parent, ctx.sender()).await).await
+	recv_runtime(request_availability_cores(relay_parent, sender).await).await
 }
 
 /// Variant of `request_availability_cores` that only returns occupied ones.
-pub async fn get_occupied_cores<Context>(
-	ctx: &mut Context,
+pub async fn get_occupied_cores<Sender>(
+	sender: &mut Sender,
 	relay_parent: Hash,
 ) -> Result<Vec<OccupiedCore>>
 where
-	Context: SubsystemContext,
+	Sender: overseer::SubsystemSender<RuntimeApiMessage>,
 {
-	let cores = get_availability_cores(ctx, relay_parent).await?;
+	let cores = get_availability_cores(sender, relay_parent).await?;
 
 	Ok(cores
 		.into_iter()
@@ -289,17 +298,16 @@ where
 }
 
 /// Get group rotation info based on the given `relay_parent`.
-pub async fn get_group_rotation_info<Context>(
-	ctx: &mut Context,
+pub async fn get_group_rotation_info<Sender>(
+	sender: &mut Sender,
 	relay_parent: Hash,
 ) -> Result<GroupRotationInfo>
 where
-	Context: SubsystemContext,
+	Sender: overseer::SubsystemSender<RuntimeApiMessage>,
 {
 	// We drop `groups` here as we don't need them, because of `RuntimeInfo`. Ideally we would not
 	// fetch them in the first place.
-	let (_, info) =
-		recv_runtime(request_validator_groups(relay_parent, ctx.sender()).await).await?;
+	let (_, info) = recv_runtime(request_validator_groups(relay_parent, sender).await).await?;
 	Ok(info)
 }
 
@@ -309,9 +317,20 @@ pub async fn get_candidate_events<Sender>(
 	relay_parent: Hash,
 ) -> Result<Vec<CandidateEvent>>
 where
-	Sender: SubsystemSender,
+	Sender: SubsystemSender<RuntimeApiMessage>,
 {
 	recv_runtime(request_candidate_events(relay_parent, sender).await).await
+}
+
+/// Get on chain votes.
+pub async fn get_on_chain_votes<Sender>(
+	sender: &mut Sender,
+	relay_parent: Hash,
+) -> Result<Option<ScrapedOnChainVotes>>
+where
+	Sender: SubsystemSender<RuntimeApiMessage>,
+{
+	recv_runtime(request_on_chain_votes(relay_parent, sender).await).await
 }
 
 /// Fetch `ValidationCode` by hash from the runtime.
@@ -321,8 +340,56 @@ pub async fn get_validation_code_by_hash<Sender>(
 	validation_code_hash: ValidationCodeHash,
 ) -> Result<Option<ValidationCode>>
 where
-	Sender: SubsystemSender,
+	Sender: SubsystemSender<RuntimeApiMessage>,
 {
 	recv_runtime(request_validation_code_by_hash(relay_parent, validation_code_hash, sender).await)
 		.await
+}
+
+/// Fetch a list of `PendingSlashes` from the runtime.
+pub async fn get_unapplied_slashes<Sender>(
+	sender: &mut Sender,
+	relay_parent: Hash,
+) -> Result<Vec<(SessionIndex, CandidateHash, vstaging::slashing::PendingSlashes)>>
+where
+	Sender: SubsystemSender<RuntimeApiMessage>,
+{
+	recv_runtime(request_unapplied_slashes(relay_parent, sender).await).await
+}
+
+/// Generate validator key ownership proof.
+///
+/// Note: The choice of `relay_parent` is important here, it needs to match
+/// the desired session index of the validator set in question.
+pub async fn key_ownership_proof<Sender>(
+	sender: &mut Sender,
+	relay_parent: Hash,
+	validator_id: ValidatorId,
+) -> Result<Option<vstaging::slashing::OpaqueKeyOwnershipProof>>
+where
+	Sender: SubsystemSender<RuntimeApiMessage>,
+{
+	recv_runtime(request_key_ownership_proof(relay_parent, validator_id, sender).await).await
+}
+
+/// Submit a past-session dispute slashing report.
+pub async fn submit_report_dispute_lost<Sender>(
+	sender: &mut Sender,
+	relay_parent: Hash,
+	dispute_proof: vstaging::slashing::DisputeProof,
+	key_ownership_proof: vstaging::slashing::OpaqueKeyOwnershipProof,
+) -> Result<Option<()>>
+where
+	Sender: SubsystemSender<RuntimeApiMessage>,
+{
+	recv_runtime(
+		request_submit_report_dispute_lost(
+			relay_parent,
+			dispute_proof,
+			key_ownership_proof,
+			sender,
+		)
+		.await,
+	)
+	.await
 }

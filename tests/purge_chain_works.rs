@@ -1,4 +1,4 @@
-// Copyright 2020 Parity Technologies (UK) Ltd.
+// Copyright (C) Parity Technologies (UK) Ltd.
 // This file is part of Substrate.
 
 // Substrate is free software: you can redistribute it and/or modify
@@ -15,7 +15,10 @@
 // along with Substrate.  If not, see <http://www.gnu.org/licenses/>.
 
 use assert_cmd::cargo::cargo_bin;
-use std::{process::Command, time::Duration};
+use std::{
+	process::{self, Command},
+	time::Duration,
+};
 use tempfile::tempdir;
 
 pub mod common;
@@ -31,15 +34,22 @@ async fn purge_chain_rocksdb_works() {
 	let tmpdir = tempdir().expect("could not create temp dir");
 
 	let mut cmd = Command::new(cargo_bin("polkadot"))
-		.args(&["--dev", "-d"])
+		.stdout(process::Stdio::piped())
+		.stderr(process::Stdio::piped())
+		.args(["--dev", "-d"])
 		.arg(tmpdir.path())
 		.arg("--port")
 		.arg("33034")
+		.arg("--no-hardware-benchmarks")
 		.spawn()
 		.unwrap();
 
+	let (ws_url, _) = common::find_ws_url_from_output(cmd.stderr.take().unwrap());
+
 	// Let it produce 1 block.
-	common::wait_n_finalized_blocks(1, Duration::from_secs(60)).await.unwrap();
+	common::wait_n_finalized_blocks(1, Duration::from_secs(60), &ws_url)
+		.await
+		.unwrap();
 
 	// Send SIGINT to node.
 	kill(Pid::from_raw(cmd.id().try_into().unwrap()), SIGINT).unwrap();
@@ -51,7 +61,7 @@ async fn purge_chain_rocksdb_works() {
 
 	// Purge chain
 	let status = Command::new(cargo_bin("polkadot"))
-		.args(&["purge-chain", "--dev", "-d"])
+		.args(["purge-chain", "--dev", "-d"])
 		.arg(tmpdir.path())
 		.arg("-y")
 		.status()
@@ -74,15 +84,22 @@ async fn purge_chain_paritydb_works() {
 	let tmpdir = tempdir().expect("could not create temp dir");
 
 	let mut cmd = Command::new(cargo_bin("polkadot"))
-		.args(&["--dev", "-d"])
+		.stdout(process::Stdio::piped())
+		.stderr(process::Stdio::piped())
+		.args(["--dev", "-d"])
 		.arg(tmpdir.path())
 		.arg("--database")
 		.arg("paritydb-experimental")
+		.arg("--no-hardware-benchmarks")
 		.spawn()
 		.unwrap();
 
+	let (ws_url, _) = common::find_ws_url_from_output(cmd.stderr.take().unwrap());
+
 	// Let it produce 1 block.
-	common::wait_n_finalized_blocks(1, Duration::from_secs(60)).await.unwrap();
+	common::wait_n_finalized_blocks(1, Duration::from_secs(60), &ws_url)
+		.await
+		.unwrap();
 
 	// Send SIGINT to node.
 	kill(Pid::from_raw(cmd.id().try_into().unwrap()), SIGINT).unwrap();
@@ -94,7 +111,7 @@ async fn purge_chain_paritydb_works() {
 
 	// Purge chain
 	let status = Command::new(cargo_bin("polkadot"))
-		.args(&["purge-chain", "--dev", "-d"])
+		.args(["purge-chain", "--dev", "-d"])
 		.arg(tmpdir.path())
 		.arg("--database")
 		.arg("paritydb-experimental")

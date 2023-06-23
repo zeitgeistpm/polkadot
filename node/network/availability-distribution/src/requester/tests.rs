@@ -1,4 +1,4 @@
-// Copyright 2022 Parity Technologies (UK) Ltd.
+// Copyright (C) Parity Technologies (UK) Ltd.
 // This file is part of Polkadot.
 
 // Polkadot is free software: you can redistribute it and/or modify
@@ -14,25 +14,29 @@
 // You should have received a copy of the GNU General Public License
 // along with Polkadot.  If not, see <http://www.gnu.org/licenses/>.
 
+use std::collections::HashMap;
+
 use std::{future::Future, sync::Arc};
 
 use futures::FutureExt;
 
 use polkadot_node_network_protocol::jaeger;
-use polkadot_node_primitives::{BlockData, ErasureChunk, PoV, SpawnNamed};
+use polkadot_node_primitives::{BlockData, ErasureChunk, PoV};
 use polkadot_node_subsystem_util::runtime::RuntimeInfo;
-use polkadot_primitives::v2::{
-	BlockNumber, CoreState, GroupIndex, Hash, Id, ScheduledCore, SessionIndex, SessionInfo,
+use polkadot_primitives::{
+	BlockNumber, CoreState, GroupIndex, Hash, Id as ParaId, ScheduledCore, SessionIndex,
+	SessionInfo,
 };
+use sp_core::traits::SpawnNamed;
 
-use polkadot_subsystem::{
+use polkadot_node_subsystem::{
 	messages::{
 		AllMessages, AvailabilityDistributionMessage, AvailabilityStoreMessage, ChainApiMessage,
-		NetworkBridgeMessage, RuntimeApiMessage, RuntimeApiRequest,
+		NetworkBridgeTxMessage, RuntimeApiMessage, RuntimeApiRequest,
 	},
-	ActivatedLeaf, ActiveLeavesUpdate, LeafStatus,
+	ActivatedLeaf, ActiveLeavesUpdate, LeafStatus, SpawnGlue,
 };
-use polkadot_subsystem_testhelpers::{
+use polkadot_node_subsystem_test_helpers::{
 	make_subsystem_context, mock::make_ferdie_keystore, TestSubsystemContext,
 	TestSubsystemContextHandle,
 };
@@ -83,7 +87,7 @@ fn spawn_virtual_overseer(
 					break
 				}
 				match msg.unwrap() {
-					AllMessages::NetworkBridge(NetworkBridgeMessage::SendRequests(..)) => {},
+					AllMessages::NetworkBridgeTx(NetworkBridgeTxMessage::SendRequests(..)) => {},
 					AllMessages::AvailabilityStore(AvailabilityStoreMessage::QueryChunk(
 						..,
 						tx,
@@ -117,7 +121,7 @@ fn spawn_virtual_overseer(
 									.expect("Receiver should be alive.");
 							},
 							RuntimeApiRequest::AvailabilityCores(tx) => {
-								let para_id = Id::from(1);
+								let para_id = ParaId::from(1_u32);
 								let maybe_block_position =
 									test_state.relay_chain.iter().position(|h| *h == hash);
 								let cores = match maybe_block_position {
@@ -173,7 +177,9 @@ fn spawn_virtual_overseer(
 
 fn test_harness<T: Future<Output = ()>>(
 	test_state: TestState,
-	test_fx: impl FnOnce(TestSubsystemContext<AvailabilityDistributionMessage, TaskExecutor>) -> T,
+	test_fx: impl FnOnce(
+		TestSubsystemContext<AvailabilityDistributionMessage, SpawnGlue<TaskExecutor>>,
+	) -> T,
 ) {
 	let pool = TaskExecutor::new();
 	let (ctx, ctx_handle) = make_subsystem_context(pool.clone());
@@ -192,7 +198,7 @@ fn check_ancestry_lookup_in_same_session() {
 
 	test_harness(test_state.clone(), |mut ctx| async move {
 		let chain = &test_state.relay_chain;
-
+		let spans: HashMap<Hash, jaeger::PerLeafSpan> = HashMap::new();
 		let block_number = 1;
 		let update = ActiveLeavesUpdate {
 			activated: Some(ActivatedLeaf {
@@ -205,7 +211,7 @@ fn check_ancestry_lookup_in_same_session() {
 		};
 
 		requester
-			.update_fetching_heads(&mut ctx, &mut runtime, update)
+			.update_fetching_heads(&mut ctx, &mut runtime, update, &spans)
 			.await
 			.expect("Leaf processing failed");
 		let fetch_tasks = &requester.fetches;
@@ -225,7 +231,7 @@ fn check_ancestry_lookup_in_same_session() {
 		};
 
 		requester
-			.update_fetching_heads(&mut ctx, &mut runtime, update)
+			.update_fetching_heads(&mut ctx, &mut runtime, update, &spans)
 			.await
 			.expect("Leaf processing failed");
 		let fetch_tasks = &requester.fetches;
@@ -251,7 +257,7 @@ fn check_ancestry_lookup_in_same_session() {
 			deactivated: vec![chain[1], chain[2]].into(),
 		};
 		requester
-			.update_fetching_heads(&mut ctx, &mut runtime, update)
+			.update_fetching_heads(&mut ctx, &mut runtime, update, &spans)
 			.await
 			.expect("Leaf processing failed");
 		let fetch_tasks = &requester.fetches;
@@ -279,7 +285,7 @@ fn check_ancestry_lookup_in_different_sessions() {
 
 	test_harness(test_state.clone(), |mut ctx| async move {
 		let chain = &test_state.relay_chain;
-
+		let spans: HashMap<Hash, jaeger::PerLeafSpan> = HashMap::new();
 		let block_number = 3;
 		let update = ActiveLeavesUpdate {
 			activated: Some(ActivatedLeaf {
@@ -292,7 +298,7 @@ fn check_ancestry_lookup_in_different_sessions() {
 		};
 
 		requester
-			.update_fetching_heads(&mut ctx, &mut runtime, update)
+			.update_fetching_heads(&mut ctx, &mut runtime, update, &spans)
 			.await
 			.expect("Leaf processing failed");
 		let fetch_tasks = &requester.fetches;
@@ -310,7 +316,7 @@ fn check_ancestry_lookup_in_different_sessions() {
 		};
 
 		requester
-			.update_fetching_heads(&mut ctx, &mut runtime, update)
+			.update_fetching_heads(&mut ctx, &mut runtime, update, &spans)
 			.await
 			.expect("Leaf processing failed");
 		let fetch_tasks = &requester.fetches;
@@ -328,7 +334,7 @@ fn check_ancestry_lookup_in_different_sessions() {
 		};
 
 		requester
-			.update_fetching_heads(&mut ctx, &mut runtime, update)
+			.update_fetching_heads(&mut ctx, &mut runtime, update, &spans)
 			.await
 			.expect("Leaf processing failed");
 		let fetch_tasks = &requester.fetches;

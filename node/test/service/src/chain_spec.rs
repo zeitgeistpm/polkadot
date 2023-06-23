@@ -1,4 +1,4 @@
-// Copyright 2020 Parity Technologies (UK) Ltd.
+// Copyright (C) Parity Technologies (UK) Ltd.
 // This file is part of Polkadot.
 
 // Polkadot is free software: you can redistribute it and/or modify
@@ -19,8 +19,10 @@
 use babe_primitives::AuthorityId as BabeId;
 use grandpa::AuthorityId as GrandpaId;
 use pallet_staking::Forcing;
-use polkadot_primitives::v2::{AccountId, AssignmentId, ValidatorId, MAX_CODE_SIZE, MAX_POV_SIZE};
-use polkadot_service::chain_spec::{get_account_id_from_seed, get_from_seed, Extensions};
+use polkadot_primitives::{AccountId, AssignmentId, ValidatorId, MAX_CODE_SIZE, MAX_POV_SIZE};
+use polkadot_service::chain_spec::{
+	get_account_id_from_seed, get_from_seed, polkadot_chain_spec_properties, Extensions,
+};
 use polkadot_test_runtime::BABE_GENESIS_EPOCH_CONFIG;
 use sc_chain_spec::{ChainSpec, ChainType};
 use sp_authority_discovery::AuthorityId as AuthorityDiscoveryId;
@@ -32,7 +34,7 @@ const DEFAULT_PROTOCOL_ID: &str = "dot";
 
 /// The `ChainSpec` parameterized for polkadot test runtime.
 pub type PolkadotChainSpec =
-	sc_service::GenericChainSpec<polkadot_test_runtime::GenesisConfig, Extensions>;
+	sc_service::GenericChainSpec<polkadot_test_runtime::RuntimeGenesisConfig, Extensions>;
 
 /// Local testnet config (multivalidator Alice + Bob)
 pub fn polkadot_local_testnet_config() -> PolkadotChainSpec {
@@ -45,13 +47,13 @@ pub fn polkadot_local_testnet_config() -> PolkadotChainSpec {
 		None,
 		Some(DEFAULT_PROTOCOL_ID),
 		None,
-		None,
+		Some(polkadot_chain_spec_properties()),
 		Default::default(),
 	)
 }
 
 /// Local testnet genesis config (multivalidator Alice + Bob)
-pub fn polkadot_local_testnet_genesis() -> polkadot_test_runtime::GenesisConfig {
+pub fn polkadot_local_testnet_genesis() -> polkadot_test_runtime::RuntimeGenesisConfig {
 	polkadot_testnet_genesis(
 		vec![get_authority_keys_from_seed("Alice"), get_authority_keys_from_seed("Bob")],
 		get_account_id_from_seed::<sr25519::Public>("Alice"),
@@ -91,7 +93,7 @@ fn testnet_accounts() -> Vec<AccountId> {
 	]
 }
 
-/// Helper function to create polkadot `GenesisConfig` for testing
+/// Helper function to create polkadot `RuntimeGenesisConfig` for testing
 fn polkadot_testnet_genesis(
 	initial_authorities: Vec<(
 		AccountId,
@@ -104,7 +106,7 @@ fn polkadot_testnet_genesis(
 	)>,
 	root_key: AccountId,
 	endowed_accounts: Option<Vec<AccountId>>,
-) -> polkadot_test_runtime::GenesisConfig {
+) -> polkadot_test_runtime::RuntimeGenesisConfig {
 	use polkadot_test_runtime as runtime;
 
 	let endowed_accounts: Vec<AccountId> = endowed_accounts.unwrap_or_else(testnet_accounts);
@@ -112,7 +114,7 @@ fn polkadot_testnet_genesis(
 	const ENDOWMENT: u128 = 1_000_000 * DOTS;
 	const STASH: u128 = 100 * DOTS;
 
-	runtime::GenesisConfig {
+	runtime::RuntimeGenesisConfig {
 		system: runtime::SystemConfig {
 			code: runtime::WASM_BINARY.expect("Wasm binary must be built for testing").to_vec(),
 			..Default::default()
@@ -144,7 +146,7 @@ fn polkadot_testnet_genesis(
 			validator_count: 2,
 			stakers: initial_authorities
 				.iter()
-				.map(|x| (x.0.clone(), x.1.clone(), STASH, runtime::StakerStatus::Validator))
+				.map(|x| (x.0.clone(), x.0.clone(), STASH, runtime::StakerStatus::Validator))
 				.collect(),
 			invulnerables: initial_authorities.iter().map(|x| x.0.clone()).collect(),
 			force_era: Forcing::NotForcing,

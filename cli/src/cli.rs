@@ -1,4 +1,4 @@
-// Copyright 2017-2020 Parity Technologies (UK) Ltd.
+// Copyright (C) Parity Technologies (UK) Ltd.
 // This file is part of Polkadot.
 
 // Polkadot is free software: you can redistribute it and/or modify
@@ -43,16 +43,16 @@ pub enum Subcommand {
 	Revert(sc_cli::RevertCmd),
 
 	#[allow(missing_docs)]
-	#[clap(name = "prepare-worker", hide = true)]
+	#[command(name = "prepare-worker", hide = true)]
 	PvfPrepareWorker(ValidationWorkerCommand),
 
 	#[allow(missing_docs)]
-	#[clap(name = "execute-worker", hide = true)]
+	#[command(name = "execute-worker", hide = true)]
 	PvfExecuteWorker(ValidationWorkerCommand),
 
 	/// Sub-commands concerned with benchmarking.
 	/// The pallet benchmarking moved to the `pallet` sub-command.
-	#[clap(subcommand)]
+	#[command(subcommand)]
 	Benchmark(frame_benchmarking_cli::BenchmarkCmd),
 
 	/// Runs performance checks such as PVF compilation in order to measure machine
@@ -68,35 +68,41 @@ pub enum Subcommand {
 	TryRuntime,
 
 	/// Key management CLI utilities
-	#[clap(subcommand)]
+	#[command(subcommand)]
 	Key(sc_cli::KeySubcommand),
+
+	/// Db meta columns information.
+	ChainInfo(sc_cli::ChainInfoCmd),
 }
 
 #[allow(missing_docs)]
 #[derive(Debug, Parser)]
 pub struct ValidationWorkerCommand {
 	/// The path to the validation host's socket.
+	#[arg(long)]
 	pub socket_path: String,
+	/// Calling node implementation version
+	#[arg(long)]
+	pub node_impl_version: String,
 }
 
 #[allow(missing_docs)]
 #[derive(Debug, Parser)]
-#[cfg_attr(feature = "malus", derive(Clone))]
+#[group(skip)]
 pub struct RunCmd {
-	#[allow(missing_docs)]
 	#[clap(flatten)]
 	pub base: sc_cli::RunCmd,
 
 	/// Force using Kusama native runtime.
-	#[clap(long = "force-kusama")]
+	#[arg(long = "force-kusama")]
 	pub force_kusama: bool,
 
 	/// Force using Westend native runtime.
-	#[clap(long = "force-westend")]
+	#[arg(long = "force-westend")]
 	pub force_westend: bool,
 
 	/// Force using Rococo native runtime.
-	#[clap(long = "force-rococo")]
+	#[arg(long = "force-rococo")]
 	pub force_rococo: bool,
 
 	/// Setup a GRANDPA scheduled voting pause.
@@ -105,33 +111,54 @@ pub struct RunCmd {
 	/// blocks). After the given block number is finalized the GRANDPA voter
 	/// will temporarily stop voting for new blocks until the given delay has
 	/// elapsed (i.e. until a block at height `pause_block + delay` is imported).
-	#[clap(long = "grandpa-pause", number_of_values(2))]
+	#[arg(long = "grandpa-pause", num_args = 2)]
 	pub grandpa_pause: Vec<u32>,
 
-	/// Enable the BEEFY gadget (only on Rococo or Wococo for now).
-	#[clap(long)]
-	pub beefy: bool,
+	/// Disable the BEEFY gadget
+	/// (currently enabled by default on Rococo, Wococo and Versi).
+	#[arg(long)]
+	pub no_beefy: bool,
 
 	/// Add the destination address to the jaeger agent.
 	///
 	/// Must be valid socket address, of format `IP:Port`
 	/// commonly `127.0.0.1:6831`.
-	#[clap(long)]
+	#[arg(long)]
 	pub jaeger_agent: Option<String>,
 
 	/// Add the destination address to the `pyroscope` agent.
 	///
 	/// Must be valid socket address, of format `IP:Port`
 	/// commonly `127.0.0.1:4040`.
-	#[clap(long)]
+	#[arg(long)]
 	pub pyroscope_server: Option<String>,
+
+	/// Disable automatic hardware benchmarks.
+	///
+	/// By default these benchmarks are automatically ran at startup and measure
+	/// the CPU speed, the memory bandwidth and the disk speed.
+	///
+	/// The results are then printed out in the logs, and also sent as part of
+	/// telemetry, if telemetry is enabled.
+	#[arg(long)]
+	pub no_hardware_benchmarks: bool,
+
+	/// Overseer message capacity override.
+	///
+	/// **Dangerous!** Do not touch unless explicitly adviced to.
+	#[arg(long)]
+	pub overseer_channel_capacity_override: Option<usize>,
 }
 
 #[allow(missing_docs)]
 #[derive(Debug, Parser)]
 pub struct Cli {
-	#[clap(subcommand)]
+	#[command(subcommand)]
 	pub subcommand: Option<Subcommand>,
+
 	#[clap(flatten)]
 	pub run: RunCmd,
+
+	#[clap(flatten)]
+	pub storage_monitor: sc_storage_monitor::StorageMonitorParams,
 }

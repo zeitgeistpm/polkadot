@@ -1,4 +1,4 @@
-// Copyright 2017-2021 Parity Technologies (UK) Ltd.
+// Copyright (C) Parity Technologies (UK) Ltd.
 // This file is part of Polkadot.
 
 // Polkadot is free software: you can redistribute it and/or modify
@@ -70,11 +70,11 @@ impl<T: frame_system::Config> runtime_parachains::paras_inherent::WeightInfo for
 	// Storage: Hrmp HrmpWatermarks (r:0 w:1)
 	// Storage: Paras Heads (r:0 w:1)
 	fn enter_variable_disputes(v: u32, ) -> Weight {
-		(352_590_000 as Weight)
+		Weight::from_parts(352_590_000 as u64, 0)
 			// Standard Error: 13_000
-			.saturating_add((49_254_000 as Weight).saturating_mul(v as Weight))
-			.saturating_add(T::DbWeight::get().reads(24 as Weight))
-			.saturating_add(T::DbWeight::get().writes(16 as Weight))
+			.saturating_add(Weight::from_parts(49_254_000 as u64, 0).saturating_mul(v as u64))
+			.saturating_add(T::DbWeight::get().reads(24 as u64))
+			.saturating_add(T::DbWeight::get().writes(16 as u64))
 	}
 	// Storage: ParaInherent Included (r:1 w:1)
 	// Storage: System ParentHash (r:1 w:0)
@@ -102,9 +102,9 @@ impl<T: frame_system::Config> runtime_parachains::paras_inherent::WeightInfo for
 	// Storage: Hrmp HrmpWatermarks (r:0 w:1)
 	// Storage: Paras Heads (r:0 w:1)
 	fn enter_bitfields() -> Weight {
-		(299_878_000 as Weight)
-			.saturating_add(T::DbWeight::get().reads(21 as Weight))
-			.saturating_add(T::DbWeight::get().writes(15 as Weight))
+		Weight::from_parts(299_878_000 as u64, 0)
+			.saturating_add(T::DbWeight::get().reads(21 as u64))
+			.saturating_add(T::DbWeight::get().writes(15 as u64))
 	}
 	// Storage: ParaInherent Included (r:1 w:1)
 	// Storage: System ParentHash (r:1 w:0)
@@ -134,9 +134,9 @@ impl<T: frame_system::Config> runtime_parachains::paras_inherent::WeightInfo for
 	// Storage: Hrmp HrmpWatermarks (r:0 w:1)
 	// Storage: Paras Heads (r:0 w:1)
 	fn enter_backed_candidates_variable(_v: u32) -> Weight {
-		(442_472_000 as Weight)
-			.saturating_add(T::DbWeight::get().reads(25 as Weight))
-			.saturating_add(T::DbWeight::get().writes(14 as Weight))
+		Weight::from_parts(442_472_000 as u64, 0)
+			.saturating_add(T::DbWeight::get().reads(25 as u64))
+			.saturating_add(T::DbWeight::get().writes(14 as u64))
 	}
 	// Storage: ParaInherent Included (r:1 w:1)
 	// Storage: System ParentHash (r:1 w:0)
@@ -166,8 +166,8 @@ impl<T: frame_system::Config> runtime_parachains::paras_inherent::WeightInfo for
 	// Storage: Hrmp HrmpWatermarks (r:0 w:1)
 	// Storage: Paras Heads (r:0 w:1)
 	fn enter_backed_candidate_code_upgrade() -> Weight {
-		(36_903_411_000 as Weight)
-			.saturating_add(T::DbWeight::get().reads(25 as Weight))
-			.saturating_add(T::DbWeight::get().writes(14 as Weight))
+		Weight::from_parts(36_903_411_000 as u64, 0)
+			.saturating_add(T::DbWeight::get().reads(25 as u64))
+			.saturating_add(T::DbWeight::get().writes(14 as u64))
 	}
 }

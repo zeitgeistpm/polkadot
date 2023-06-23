@@ -1,4 +1,4 @@
-// Copyright 2021 Parity Technologies (UK) Ltd.
+// Copyright (C) Parity Technologies (UK) Ltd.
 // This file is part of Polkadot.
 
 // Polkadot is free software: you can redistribute it and/or modify
@@ -17,7 +17,7 @@
 use super::*;
 use polkadot_node_primitives::{
 	approval::{
-		AssignmentCert, AssignmentCertKind, DelayTranche, VRFOutput, VRFProof,
+		AssignmentCert, AssignmentCertKind, DelayTranche, VrfOutput, VrfProof, VrfSignature,
 		RELAY_VRF_MODULO_CONTEXT,
 	},
 	AvailableData, BlockData, PoV,
@@ -25,23 +25,23 @@ use polkadot_node_primitives::{
 use polkadot_node_subsystem::{
 	messages::{
 		AllMessages, ApprovalVotingMessage, AssignmentCheckResult, AvailabilityRecoveryMessage,
-		ImportStatementsResult,
 	},
 	ActivatedLeaf, ActiveLeavesUpdate, LeafStatus,
 };
 use polkadot_node_subsystem_test_helpers as test_helpers;
 use polkadot_node_subsystem_util::TimeoutExt;
 use polkadot_overseer::HeadSupportsParachains;
-use polkadot_primitives::v2::{
-	CandidateCommitments, CandidateEvent, CoreIndex, GroupIndex, Header, Id as ParaId,
+use polkadot_primitives::{
+	CandidateCommitments, CandidateEvent, CoreIndex, GroupIndex, Header, Id as ParaId, IndexedVec,
 	ValidationCode, ValidatorSignature,
 };
 use std::time::Duration;
 
 use assert_matches::assert_matches;
+use async_trait::async_trait;
 use parking_lot::Mutex;
 use sp_keyring::sr25519::Keyring as Sr25519Keyring;
-use sp_keystore::CryptoStore;
+use sp_keystore::Keystore;
 use std::{
 	pin::Pin,
 	sync::{
@@ -54,14 +54,16 @@ use super::{
 	approval_db::v1::StoredBlockRange,
 	backend::BackendWriteOp,
 	import::tests::{
-		garbage_vrf, AllowedSlots, BabeEpoch, BabeEpochConfiguration, CompatibleDigestItem, Digest,
-		DigestItem, PreDigest, SecondaryVRFPreDigest,
+		garbage_vrf_signature, AllowedSlots, BabeEpoch, BabeEpochConfiguration,
+		CompatibleDigestItem, Digest, DigestItem, PreDigest, SecondaryVRFPreDigest,
 	},
 };
 
 use ::test_helpers::{dummy_candidate_receipt, dummy_candidate_receipt_bad_sig};
 
 const SLOT_DURATION_MILLIS: u64 = 5000;
+
+const TIMEOUT: Duration = Duration::from_millis(2000);
 
 #[derive(Clone)]
 struct TestSyncOracle {
@@ -80,7 +82,7 @@ impl TestSyncOracleHandle {
 }
 
 impl SyncOracle for TestSyncOracle {
-	fn is_major_syncing(&mut self) -> bool {
+	fn is_major_syncing(&self) -> bool {
 		let is_major_syncing = self.flag.load(Ordering::SeqCst);
 
 		if !is_major_syncing {
@@ -92,7 +94,7 @@ impl SyncOracle for TestSyncOracle {
 		is_major_syncing
 	}
 
-	fn is_offline(&mut self) -> bool {
+	fn is_offline(&self) -> bool {
 		unimplemented!("not used in network bridge")
 	}
 }
@@ -111,15 +113,17 @@ fn make_sync_oracle(val: bool) -> (Box<dyn SyncOracle + Send>, TestSyncOracleHan
 pub mod test_constants {
 	use crate::approval_db::v1::Config as DatabaseConfig;
 	const DATA_COL: u32 = 0;
+
 	pub(crate) const NUM_COLUMNS: u32 = 1;
 
-	pub(crate) const TEST_CONFIG: DatabaseConfig = DatabaseConfig { col_data: DATA_COL };
+	pub(crate) const TEST_CONFIG: DatabaseConfig = DatabaseConfig { col_approval_data: DATA_COL };
 }
 
 struct MockSupportsParachains;
 
+#[async_trait]
 impl HeadSupportsParachains for MockSupportsParachains {
-	fn head_supports_parachains(&self, _head: &Hash) -> bool {
+	async fn head_supports_parachains(&self, _head: &Hash) -> bool {
 		true
 	}
 }
@@ -221,7 +225,7 @@ struct MockAssignmentCriteria<Compute, Check>(Compute, Check);
 
 impl<Compute, Check> AssignmentCriteria for MockAssignmentCriteria<Compute, Check>
 where
-	Compute: Fn() -> HashMap<polkadot_primitives::v2::CoreIndex, criteria::OurAssignment>,
+	Compute: Fn() -> HashMap<polkadot_primitives::CoreIndex, criteria::OurAssignment>,
 	Check: Fn(ValidatorIndex) -> Result<DelayTranche, criteria::InvalidAssignment>,
 {
 	fn compute_assignments(
@@ -231,31 +235,28 @@ where
 		_config: &criteria::Config,
 		_leaving_cores: Vec<(
 			CandidateHash,
-			polkadot_primitives::v2::CoreIndex,
-			polkadot_primitives::v2::GroupIndex,
+			polkadot_primitives::CoreIndex,
+			polkadot_primitives::GroupIndex,
 		)>,
-	) -> HashMap<polkadot_primitives::v2::CoreIndex, criteria::OurAssignment> {
+	) -> HashMap<polkadot_primitives::CoreIndex, criteria::OurAssignment> {
 		self.0()
 	}
 
 	fn check_assignment_cert(
 		&self,
-		_claimed_core_index: polkadot_primitives::v2::CoreIndex,
+		_claimed_core_index: polkadot_primitives::CoreIndex,
 		validator_index: ValidatorIndex,
 		_config: &criteria::Config,
 		_relay_vrf_story: polkadot_node_primitives::approval::RelayVRFStory,
 		_assignment: &polkadot_node_primitives::approval::AssignmentCert,
-		_backing_group: polkadot_primitives::v2::GroupIndex,
+		_backing_group: polkadot_primitives::GroupIndex,
 	) -> Result<polkadot_node_primitives::approval::DelayTranche, criteria::InvalidAssignment> {
 		self.1(validator_index)
 	}
 }
 
 impl<F>
-	MockAssignmentCriteria<
-		fn() -> HashMap<polkadot_primitives::v2::CoreIndex, criteria::OurAssignment>,
-		F,
-	>
+	MockAssignmentCriteria<fn() -> HashMap<polkadot_primitives::CoreIndex, criteria::OurAssignment>, F>
 {
 	fn check_only(f: F) -> Self {
 		MockAssignmentCriteria(Default::default, f)
@@ -306,6 +307,9 @@ impl Backend for TestStoreInner {
 			match op {
 				BackendWriteOp::WriteStoredBlockRange(stored_block_range) => {
 					self.stored_block_range = Some(stored_block_range);
+				},
+				BackendWriteOp::DeleteStoredBlockRange => {
+					self.stored_block_range = None;
 				},
 				BackendWriteOp::WriteBlocksAtHeight(h, blocks) => {
 					self.blocks_at_height.insert(h, blocks);
@@ -384,7 +388,7 @@ fn garbage_assignment_cert(kind: AssignmentCertKind) -> AssignmentCert {
 	let (inout, proof, _) = keypair.vrf_sign(ctx.bytes(msg));
 	let out = inout.to_output();
 
-	AssignmentCert { kind, vrf: (VRFOutput(out), VRFProof(proof)) }
+	AssignmentCert { kind, vrf: VrfSignature { output: VrfOutput(out), proof: VrfProof(proof) } }
 }
 
 fn sign_approval(
@@ -471,7 +475,7 @@ fn test_harness<T: Future<Output = VirtualOverseer>>(
 
 	let keystore = LocalKeystore::in_memory();
 	let _ = keystore.sr25519_generate_new(
-		polkadot_primitives::v2::PARACHAIN_KEY_TYPE_ID,
+		polkadot_primitives::PARACHAIN_KEY_TYPE_ID,
 		Some(&Sr25519Keyring::Alice.to_seed()),
 	);
 
@@ -483,7 +487,7 @@ fn test_harness<T: Future<Output = VirtualOverseer>>(
 		context,
 		ApprovalVotingSubsystem::with_config(
 			Config {
-				col_data: test_constants::TEST_CONFIG.col_data,
+				col_approval_data: test_constants::TEST_CONFIG.col_approval_data,
 				slot_duration_millis: SLOT_DURATION_MILLIS,
 			},
 			Arc::new(db),
@@ -512,7 +516,7 @@ fn test_harness<T: Future<Output = VirtualOverseer>>(
 	.unwrap();
 }
 
-async fn overseer_send(overseer: &mut VirtualOverseer, msg: FromOverseer<ApprovalVotingMessage>) {
+async fn overseer_send(overseer: &mut VirtualOverseer, msg: FromOrchestra<ApprovalVotingMessage>) {
 	gum::trace!("Sending message:\n{:?}", &msg);
 	overseer
 		.send(msg)
@@ -539,10 +543,9 @@ async fn overseer_recv_with_timeout(
 	overseer.recv().timeout(timeout).await
 }
 
-const TIMEOUT: Duration = Duration::from_millis(2000);
 async fn overseer_signal(overseer: &mut VirtualOverseer, signal: OverseerSignal) {
 	overseer
-		.send(FromOverseer::Signal(signal))
+		.send(FromOrchestra::Signal(signal))
 		.timeout(TIMEOUT)
 		.await
 		.expect(&format!("{:?} is more than enough for sending signals.", TIMEOUT));
@@ -560,7 +563,7 @@ where
 }
 
 fn make_candidate(para_id: ParaId, hash: &Hash) -> CandidateReceipt {
-	let mut r = dummy_candidate_receipt_bad_sig(hash.clone(), Some(Default::default()));
+	let mut r = dummy_candidate_receipt_bad_sig(*hash, Some(Default::default()));
 	r.descriptor.para_id = para_id;
 	r
 }
@@ -573,7 +576,6 @@ async fn check_and_import_approval(
 	candidate_hash: CandidateHash,
 	session_index: SessionIndex,
 	expect_chain_approved: bool,
-	expect_coordinator: bool,
 	signature_opt: Option<ValidatorSignature>,
 ) -> oneshot::Receiver<ApprovalCheckResult> {
 	let signature = signature_opt.unwrap_or(sign_approval(
@@ -584,7 +586,7 @@ async fn check_and_import_approval(
 	let (tx, rx) = oneshot::channel();
 	overseer_send(
 		overseer,
-		FromOverseer::Communication {
+		FromOrchestra::Communication {
 			msg: ApprovalVotingMessage::CheckAndImportApproval(
 				IndirectSignedApprovalVote { block_hash, candidate_index, validator, signature },
 				tx,
@@ -600,19 +602,6 @@ async fn check_and_import_approval(
 			}
 		);
 	}
-	if expect_coordinator {
-		assert_matches!(
-			overseer_recv(overseer).await,
-			AllMessages::DisputeCoordinator(DisputeCoordinatorMessage::ImportStatements {
-				candidate_hash: c_hash,
-				pending_confirmation,
-				..
-			}) => {
-				assert_eq!(c_hash, candidate_hash);
-				let _ = pending_confirmation.send(ImportStatementsResult::ValidImport);
-			}
-		);
-	}
 	rx
 }
 
@@ -625,7 +614,7 @@ async fn check_and_import_assignment(
 	let (tx, rx) = oneshot::channel();
 	overseer_send(
 		overseer,
-		FromOverseer::Communication {
+		FromOrchestra::Communication {
 			msg: ApprovalVotingMessage::CheckAndImportAssignment(
 				IndirectAssignmentCert {
 					block_hash,
@@ -668,13 +657,13 @@ impl ChainBuilder {
 		builder
 	}
 
-	pub fn add_block<'a>(
-		&'a mut self,
+	pub fn add_block(
+		&mut self,
 		hash: Hash,
 		parent_hash: Hash,
 		number: u32,
 		config: BlockConfig,
-	) -> &'a mut Self {
+	) -> &mut Self {
 		assert!(number != 0, "cannot add duplicate genesis block");
 		assert!(hash != Self::GENESIS_HASH, "cannot add block with genesis hash");
 		assert!(
@@ -685,13 +674,13 @@ impl ChainBuilder {
 		self.add_block_inner(hash, parent_hash, number, config)
 	}
 
-	fn add_block_inner<'a>(
-		&'a mut self,
+	fn add_block_inner(
+		&mut self,
 		hash: Hash,
 		parent_hash: Hash,
 		number: u32,
 		config: BlockConfig,
-	) -> &'a mut Self {
+	) -> &mut Self {
 		let header = ChainBuilder::make_header(parent_hash, config.slot, number);
 		assert!(
 			self.blocks_by_hash.insert(hash, (header, config)).is_none(),
@@ -727,9 +716,9 @@ impl ChainBuilder {
 	fn make_header(parent_hash: Hash, slot: Slot, number: u32) -> Header {
 		let digest = {
 			let mut digest = Digest::default();
-			let (vrf_output, vrf_proof) = garbage_vrf();
+			let vrf_signature = garbage_vrf_signature();
 			digest.push(DigestItem::babe_pre_digest(PreDigest::SecondaryVRF(
-				SecondaryVRFPreDigest { authority_index: 0, slot, vrf_output, vrf_proof },
+				SecondaryVRFPreDigest { authority_index: 0, slot, vrf_signature },
 			)));
 			digest
 		};
@@ -749,7 +738,10 @@ fn session_info(keys: &[Sr25519Keyring]) -> SessionInfo {
 		validators: keys.iter().map(|v| v.public().into()).collect(),
 		discovery_keys: keys.iter().map(|v| v.public().into()).collect(),
 		assignment_keys: keys.iter().map(|v| v.public().into()).collect(),
-		validator_groups: vec![vec![ValidatorIndex(0)], vec![ValidatorIndex(1)]],
+		validator_groups: IndexedVec::<GroupIndex, Vec<ValidatorIndex>>::from(vec![
+			vec![ValidatorIndex(0)],
+			vec![ValidatorIndex(1)],
+		]),
 		n_cores: keys.len() as _,
 		needed_approvals: 2,
 		zeroth_delay_tranche_width: 5,
@@ -772,7 +764,7 @@ async fn import_block(
 ) {
 	let (new_head, new_header) = &hashes[hashes.len() - 1];
 	let candidates = config.candidates.clone().unwrap_or(vec![(
-		make_candidate(0.into(), &new_head),
+		make_candidate(ParaId::from(0_u32), &new_head),
 		CoreIndex(0),
 		GroupIndex(0),
 	)]);
@@ -784,7 +776,7 @@ async fn import_block(
 
 	overseer_send(
 		overseer,
-		FromOverseer::Signal(OverseerSignal::ActiveLeaves(ActiveLeavesUpdate::start_work(
+		FromOrchestra::Signal(OverseerSignal::ActiveLeaves(ActiveLeavesUpdate::start_work(
 			ActivatedLeaf {
 				hash: *new_head,
 				number,
@@ -802,36 +794,7 @@ async fn import_block(
 			h_tx.send(Ok(Some(new_header.clone()))).unwrap();
 		}
 	);
-
-	assert_matches!(
-		overseer_recv(overseer).await,
-		AllMessages::RuntimeApi(
-			RuntimeApiMessage::Request(
-				req_block_hash,
-				RuntimeApiRequest::SessionIndexForChild(s_tx)
-			)
-		) => {
-			let hash = &hashes[number as usize];
-			assert_eq!(req_block_hash, hash.0);
-			s_tx.send(Ok(number.into())).unwrap();
-		}
-	);
-
 	if !fork {
-		assert_matches!(
-			overseer_recv(overseer).await,
-			AllMessages::RuntimeApi(
-				RuntimeApiMessage::Request(
-					req_block_hash,
-					RuntimeApiRequest::SessionInfo(idx, si_tx),
-				)
-			) => {
-				assert_eq!(number, idx);
-				assert_eq!(req_block_hash, *new_head);
-				si_tx.send(Ok(Some(session_info.clone()))).unwrap();
-			}
-		);
-
 		let mut _ancestry_step = 0;
 		if gap {
 			assert_matches!(
@@ -932,6 +895,23 @@ async fn import_block(
 			}
 		);
 	} else {
+		if !fork {
+			// SessionInfo won't be called for forks - it's already cached
+			assert_matches!(
+				overseer_recv(overseer).await,
+				AllMessages::RuntimeApi(
+					RuntimeApiMessage::Request(
+						req_block_hash,
+						RuntimeApiRequest::SessionInfo(_, si_tx),
+					)
+				) => {
+					// Make sure all SessionInfo calls are not made for the leaf (but for its relay parent)
+					assert_ne!(req_block_hash, hashes[(number-1) as usize].0);
+					si_tx.send(Ok(Some(session_info.clone()))).unwrap();
+				}
+			);
+		}
+
 		assert_matches!(
 			overseer_recv(overseer).await,
 			AllMessages::ApprovalDistribution(
@@ -1009,8 +989,11 @@ fn subsystem_rejects_bad_assignment_ok_criteria() {
 
 #[test]
 fn subsystem_rejects_bad_assignment_err_criteria() {
-	let assignment_criteria =
-		Box::new(MockAssignmentCriteria::check_only(move |_| Err(criteria::InvalidAssignment)));
+	let assignment_criteria = Box::new(MockAssignmentCriteria::check_only(move |_| {
+		Err(criteria::InvalidAssignment(
+			criteria::InvalidAssignmentReason::ValidatorIndexOutOfBounds,
+		))
+	}));
 	let config = HarnessConfigBuilder::default().assignment_criteria(assignment_criteria).build();
 	test_harness(config, |test_harness| async move {
 		let TestHarness { mut virtual_overseer, sync_oracle_handle: _sync_oracle_handle, .. } =
@@ -1047,7 +1030,10 @@ fn subsystem_rejects_bad_assignment_err_criteria() {
 
 		assert_eq!(
 			rx.await,
-			Ok(AssignmentCheckResult::Bad(AssignmentCheckError::InvalidCert(ValidatorIndex(0)))),
+			Ok(AssignmentCheckResult::Bad(AssignmentCheckError::InvalidCert(
+				ValidatorIndex(0),
+				"ValidatorIndexOutOfBounds".to_string(),
+			))),
 		);
 
 		virtual_overseer
@@ -1071,10 +1057,10 @@ fn blank_subsystem_act_on_bad_block() {
 
 		overseer_send(
 			&mut virtual_overseer,
-			FromOverseer::Communication {
+			FromOrchestra::Communication {
 				msg: ApprovalVotingMessage::CheckAndImportAssignment(
 					IndirectAssignmentCert {
-						block_hash: bad_block_hash.clone(),
+						block_hash: bad_block_hash,
 						validator: 0u32.into(),
 						cert: garbage_assignment_cert(AssignmentCertKind::RelayVRFModulo {
 							sample: 0,
@@ -1120,7 +1106,7 @@ fn subsystem_rejects_approval_if_no_candidate_entry() {
 		let candidate_index = 0;
 		let validator = ValidatorIndex(0);
 
-		let candidate_descriptor = make_candidate(1.into(), &block_hash);
+		let candidate_descriptor = make_candidate(ParaId::from(1_u32), &block_hash);
 		let candidate_hash = candidate_descriptor.hash();
 
 		let head: Hash = ChainBuilder::GENESIS_HASH;
@@ -1150,7 +1136,6 @@ fn subsystem_rejects_approval_if_no_candidate_entry() {
 			validator,
 			candidate_hash,
 			session_index,
-			false,
 			false,
 			None,
 		)
@@ -1193,7 +1178,6 @@ fn subsystem_rejects_approval_if_no_block_entry() {
 			candidate_hash,
 			session_index,
 			false,
-			false,
 			None,
 		)
 		.await;
@@ -1226,7 +1210,7 @@ fn subsystem_rejects_approval_before_assignment() {
 		let candidate_hash = {
 			let mut candidate_receipt =
 				dummy_candidate_receipt_bad_sig(block_hash, Some(Default::default()));
-			candidate_receipt.descriptor.para_id = 0.into();
+			candidate_receipt.descriptor.para_id = ParaId::from(0_u32);
 			candidate_receipt.descriptor.relay_parent = block_hash;
 			candidate_receipt.hash()
 		};
@@ -1253,7 +1237,6 @@ fn subsystem_rejects_approval_before_assignment() {
 			validator,
 			candidate_hash,
 			session_index,
-			false,
 			false,
 			None,
 		)
@@ -1441,7 +1424,7 @@ fn subsystem_accepts_and_imports_approval_after_assignment() {
 		let candidate_hash = {
 			let mut candidate_receipt =
 				dummy_candidate_receipt_bad_sig(block_hash, Some(Default::default()));
-			candidate_receipt.descriptor.para_id = 0.into();
+			candidate_receipt.descriptor.para_id = ParaId::from(0_u32);
 			candidate_receipt.descriptor.relay_parent = block_hash;
 			candidate_receipt.hash()
 		};
@@ -1479,7 +1462,6 @@ fn subsystem_accepts_and_imports_approval_after_assignment() {
 			candidate_hash,
 			session_index,
 			true,
-			true,
 			None,
 		)
 		.await;
@@ -1512,7 +1494,7 @@ fn subsystem_second_approval_import_only_schedules_wakeups() {
 		let candidate_hash = {
 			let mut candidate_receipt =
 				dummy_candidate_receipt_bad_sig(block_hash, Some(Default::default()));
-			candidate_receipt.descriptor.para_id = 0.into();
+			candidate_receipt.descriptor.para_id = ParaId::from(0_u32);
 			candidate_receipt.descriptor.relay_parent = block_hash;
 			candidate_receipt.hash()
 		};
@@ -1529,11 +1511,11 @@ fn subsystem_second_approval_import_only_schedules_wakeups() {
 			Sr25519Keyring::Eve,
 		];
 		let session_info = SessionInfo {
-			validator_groups: vec![
+			validator_groups: IndexedVec::<GroupIndex, Vec<ValidatorIndex>>::from(vec![
 				vec![ValidatorIndex(0), ValidatorIndex(1)],
 				vec![ValidatorIndex(2)],
 				vec![ValidatorIndex(3), ValidatorIndex(4)],
-			],
+			]),
 			needed_approvals: 1,
 			..session_info(&validators)
 		};
@@ -1573,7 +1555,6 @@ fn subsystem_second_approval_import_only_schedules_wakeups() {
 			candidate_hash,
 			session_index,
 			false,
-			true,
 			None,
 		)
 		.await;
@@ -1590,7 +1571,6 @@ fn subsystem_second_approval_import_only_schedules_wakeups() {
 			validator,
 			candidate_hash,
 			session_index,
-			false,
 			false,
 			None,
 		)
@@ -1745,7 +1725,7 @@ fn linear_import_act_on_leaf() {
 
 		overseer_send(
 			&mut virtual_overseer,
-			FromOverseer::Communication {
+			FromOrchestra::Communication {
 				msg: ApprovalVotingMessage::CheckAndImportAssignment(
 					IndirectAssignmentCert {
 						block_hash: head,
@@ -1815,7 +1795,7 @@ fn forkful_import_at_same_height_act_on_leaf() {
 
 			overseer_send(
 				&mut virtual_overseer,
-				FromOverseer::Communication {
+				FromOrchestra::Communication {
 					msg: ApprovalVotingMessage::CheckAndImportAssignment(
 						IndirectAssignmentCert {
 							block_hash: head,
@@ -1868,15 +1848,15 @@ fn import_checked_approval_updates_entries_and_schedules() {
 			Sr25519Keyring::Eve,
 		];
 		let session_info = SessionInfo {
-			validator_groups: vec![
+			validator_groups: IndexedVec::<GroupIndex, Vec<ValidatorIndex>>::from(vec![
 				vec![ValidatorIndex(0), ValidatorIndex(1)],
 				vec![ValidatorIndex(2)],
 				vec![ValidatorIndex(3), ValidatorIndex(4)],
-			],
+			]),
 			..session_info(&validators)
 		};
 
-		let candidate_descriptor = make_candidate(1.into(), &block_hash);
+		let candidate_descriptor = make_candidate(ParaId::from(1_u32), &block_hash);
 		let candidate_hash = candidate_descriptor.hash();
 
 		let head: Hash = ChainBuilder::GENESIS_HASH;
@@ -1927,7 +1907,6 @@ fn import_checked_approval_updates_entries_and_schedules() {
 			candidate_hash,
 			session_index,
 			false,
-			true,
 			Some(sig_a),
 		)
 		.await;
@@ -1954,7 +1933,6 @@ fn import_checked_approval_updates_entries_and_schedules() {
 			validator_index_b,
 			candidate_hash,
 			session_index,
-			true,
 			true,
 			Some(sig_b),
 		)
@@ -2002,12 +1980,12 @@ fn subsystem_import_checked_approval_sets_one_block_bit_at_a_time() {
 
 		let candidate_receipt1 = {
 			let mut receipt = dummy_candidate_receipt(block_hash);
-			receipt.descriptor.para_id = 1.into();
+			receipt.descriptor.para_id = ParaId::from(1_u32);
 			receipt
 		};
 		let candidate_receipt2 = {
 			let mut receipt = dummy_candidate_receipt(block_hash);
-			receipt.descriptor.para_id = 2.into();
+			receipt.descriptor.para_id = ParaId::from(2_u32);
 			receipt
 		};
 		let candidate_hash1 = candidate_receipt1.hash();
@@ -2027,11 +2005,11 @@ fn subsystem_import_checked_approval_sets_one_block_bit_at_a_time() {
 			Sr25519Keyring::Eve,
 		];
 		let session_info = SessionInfo {
-			validator_groups: vec![
+			validator_groups: IndexedVec::<GroupIndex, Vec<ValidatorIndex>>::from(vec![
 				vec![ValidatorIndex(0), ValidatorIndex(1)],
 				vec![ValidatorIndex(2)],
 				vec![ValidatorIndex(3), ValidatorIndex(4)],
-			],
+			]),
 			..session_info(&validators)
 		};
 
@@ -2095,7 +2073,6 @@ fn subsystem_import_checked_approval_sets_one_block_bit_at_a_time() {
 				*candidate_hash,
 				session_index,
 				expect_block_approved,
-				true,
 				Some(signature),
 			)
 			.await;
@@ -2199,7 +2176,6 @@ fn approved_ancestor_test(
 				candidate_hash,
 				i as u32 + 1,
 				true,
-				true,
 				None,
 			)
 			.await;
@@ -2212,7 +2188,7 @@ fn approved_ancestor_test(
 		let (tx, rx) = oneshot::channel();
 		overseer_send(
 			&mut virtual_overseer,
-			FromOverseer::Communication {
+			FromOrchestra::Communication {
 				msg: ApprovalVotingMessage::ApprovedAncestor(target, 0, tx),
 			},
 		)
@@ -2288,12 +2264,8 @@ fn subsystem_validate_approvals_cache() {
 	let store = config.backend();
 
 	test_harness(config, |test_harness| async move {
-		let TestHarness {
-			mut virtual_overseer,
-			clock,
-			sync_oracle_handle: _sync_oracle_handle,
-			..
-		} = test_harness;
+		let TestHarness { mut virtual_overseer, clock, sync_oracle_handle: _sync_oracle_handle } =
+			test_harness;
 
 		assert_matches!(
 			overseer_recv(&mut virtual_overseer).await,
@@ -2319,11 +2291,11 @@ fn subsystem_validate_approvals_cache() {
 			Sr25519Keyring::Eve,
 		];
 		let session_info = SessionInfo {
-			validator_groups: vec![
+			validator_groups: IndexedVec::<GroupIndex, Vec<ValidatorIndex>>::from(vec![
 				vec![ValidatorIndex(0), ValidatorIndex(1)],
 				vec![ValidatorIndex(2)],
 				vec![ValidatorIndex(3), ValidatorIndex(4)],
-			],
+			]),
 			..session_info(&validators)
 		};
 
@@ -2375,7 +2347,7 @@ fn subsystem_validate_approvals_cache() {
 }
 
 /// Ensure that when two assignments are imported, only one triggers the Approval Checking work
-pub async fn handle_double_assignment_import(
+async fn handle_double_assignment_import(
 	virtual_overseer: &mut VirtualOverseer,
 	candidate_index: CandidateIndex,
 ) {
@@ -2392,25 +2364,33 @@ pub async fn handle_double_assignment_import(
 	recover_available_data(virtual_overseer).await;
 	fetch_validation_code(virtual_overseer).await;
 
-	let first_message = virtual_overseer.recv().await;
-	let second_message = virtual_overseer.recv().await;
-
-	for msg in vec![first_message, second_message].into_iter() {
-		match msg {
-			AllMessages::ApprovalDistribution(
-				ApprovalDistributionMessage::DistributeAssignment(_, c_index),
-			) => {
-				assert_eq!(candidate_index, c_index);
-			},
-			AllMessages::CandidateValidation(
-				CandidateValidationMessage::ValidateFromExhaustive(_, _, _, _, timeout, tx),
-			) if timeout == APPROVAL_EXECUTION_TIMEOUT => {
-				tx.send(Ok(ValidationResult::Valid(Default::default(), Default::default())))
-					.unwrap();
-			},
-			_ => panic! {},
+	assert_matches!(
+		overseer_recv(virtual_overseer).await,
+		AllMessages::ApprovalDistribution(ApprovalDistributionMessage::DistributeAssignment(
+			_,
+			c_index
+		)) => {
+			assert_eq!(candidate_index, c_index);
 		}
-	}
+	);
+
+	assert_matches!(
+		overseer_recv(virtual_overseer).await,
+		AllMessages::CandidateValidation(CandidateValidationMessage::ValidateFromExhaustive(_, _, _, _, timeout, tx)) if timeout == PvfExecTimeoutKind::Approval => {
+			tx.send(Ok(ValidationResult::Valid(Default::default(), Default::default())))
+				.unwrap();
+		}
+	);
+
+	assert_matches!(
+		overseer_recv(virtual_overseer).await,
+		AllMessages::ApprovalDistribution(ApprovalDistributionMessage::DistributeApproval(_))
+	);
+
+	assert_matches!(
+		overseer_recv(virtual_overseer).await,
+		AllMessages::ApprovalDistribution(ApprovalDistributionMessage::DistributeApproval(_))
+	);
 
 	// Assert that there are no more messages being sent by the subsystem
 	assert!(overseer_recv(virtual_overseer).timeout(TIMEOUT / 2).await.is_none());
@@ -2531,11 +2511,11 @@ where
 			Sr25519Keyring::Ferdie,
 		];
 		let session_info = SessionInfo {
-			validator_groups: vec![
+			validator_groups: IndexedVec::<GroupIndex, Vec<ValidatorIndex>>::from(vec![
 				vec![ValidatorIndex(0), ValidatorIndex(1)],
 				vec![ValidatorIndex(2), ValidatorIndex(3)],
 				vec![ValidatorIndex(4), ValidatorIndex(5)],
-			],
+			]),
 			relay_vrf_modulo_samples: 2,
 			no_show_slots,
 			..session_info(&validators)
@@ -2577,12 +2557,7 @@ where
 				candidate_hash,
 				1,
 				expect_chain_approved,
-				true,
-				Some(sign_approval(
-					validators[validator_index as usize].clone(),
-					candidate_hash,
-					1,
-				)),
+				Some(sign_approval(validators[validator_index as usize], candidate_hash, 1)),
 			)
 			.await;
 			assert_eq!(rx.await, Ok(ApprovalCheckResult::Accepted));
@@ -2815,7 +2790,9 @@ fn pre_covers_dont_stall_approval() {
 		move |validator_index| match validator_index {
 			ValidatorIndex(0 | 1) => Ok(0),
 			ValidatorIndex(2) => Ok(1),
-			ValidatorIndex(_) => Err(criteria::InvalidAssignment),
+			ValidatorIndex(_) => Err(criteria::InvalidAssignment(
+				criteria::InvalidAssignmentReason::ValidatorIndexOutOfBounds,
+			)),
 		},
 	));
 
@@ -2850,15 +2827,15 @@ fn pre_covers_dont_stall_approval() {
 			Sr25519Keyring::One,
 		];
 		let session_info = SessionInfo {
-			validator_groups: vec![
+			validator_groups: IndexedVec::<GroupIndex, Vec<ValidatorIndex>>::from(vec![
 				vec![ValidatorIndex(0), ValidatorIndex(1)],
 				vec![ValidatorIndex(2), ValidatorIndex(5)],
 				vec![ValidatorIndex(3), ValidatorIndex(4)],
-			],
+			]),
 			..session_info(&validators)
 		};
 
-		let candidate_descriptor = make_candidate(1.into(), &block_hash);
+		let candidate_descriptor = make_candidate(ParaId::from(1_u32), &block_hash);
 		let candidate_hash = candidate_descriptor.hash();
 
 		let head: Hash = ChainBuilder::GENESIS_HASH;
@@ -2919,7 +2896,6 @@ fn pre_covers_dont_stall_approval() {
 			candidate_hash,
 			session_index,
 			false,
-			true,
 			Some(sig_b),
 		)
 		.await;
@@ -2935,7 +2911,6 @@ fn pre_covers_dont_stall_approval() {
 			candidate_hash,
 			session_index,
 			false,
-			true,
 			Some(sig_c),
 		)
 		.await;
@@ -3029,15 +3004,15 @@ fn waits_until_approving_assignments_are_old_enough() {
 			Sr25519Keyring::One,
 		];
 		let session_info = SessionInfo {
-			validator_groups: vec![
+			validator_groups: IndexedVec::<GroupIndex, Vec<ValidatorIndex>>::from(vec![
 				vec![ValidatorIndex(0), ValidatorIndex(1)],
 				vec![ValidatorIndex(2), ValidatorIndex(5)],
 				vec![ValidatorIndex(3), ValidatorIndex(4)],
-			],
+			]),
 			..session_info(&validators)
 		};
 
-		let candidate_descriptor = make_candidate(1.into(), &block_hash);
+		let candidate_descriptor = make_candidate(ParaId::from(1_u32), &block_hash);
 		let candidate_hash = candidate_descriptor.hash();
 
 		let head: Hash = ChainBuilder::GENESIS_HASH;
@@ -3090,7 +3065,6 @@ fn waits_until_approving_assignments_are_old_enough() {
 			candidate_hash,
 			session_index,
 			false,
-			true,
 			Some(sig_a),
 		)
 		.await;
@@ -3107,7 +3081,6 @@ fn waits_until_approving_assignments_are_old_enough() {
 			candidate_hash,
 			session_index,
 			false,
-			true,
 			Some(sig_b),
 		)
 		.await;

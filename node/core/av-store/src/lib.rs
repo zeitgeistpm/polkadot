@@ -1,4 +1,4 @@
-// Copyright 2020 Parity Technologies (UK) Ltd.
+// Copyright (C) Parity Technologies (UK) Ltd.
 // This file is part of Polkadot.
 
 // Polkadot is free software: you can redistribute it and/or modify
@@ -26,22 +26,28 @@ use std::{
 	time::{Duration, SystemTime, SystemTimeError, UNIX_EPOCH},
 };
 
-use futures::{channel::oneshot, future, select, FutureExt};
+use futures::{
+	channel::{
+		mpsc::{channel, Receiver as MpscReceiver, Sender as MpscSender},
+		oneshot,
+	},
+	future, select, FutureExt, SinkExt, StreamExt,
+};
 use futures_timer::Delay;
 use parity_scale_codec::{Decode, Encode, Error as CodecError, Input};
 use polkadot_node_subsystem_util::database::{DBTransaction, Database};
+use sp_consensus::SyncOracle;
 
 use bitvec::{order::Lsb0 as BitOrderLsb0, vec::BitVec};
 use polkadot_node_primitives::{AvailableData, ErasureChunk};
-use polkadot_node_subsystem_util as util;
-use polkadot_primitives::v2::{
-	BlockNumber, CandidateEvent, CandidateHash, CandidateReceipt, Hash, Header, ValidatorIndex,
-};
-use polkadot_subsystem::{
+use polkadot_node_subsystem::{
 	errors::{ChainApiError, RuntimeApiError},
 	messages::{AvailabilityStoreMessage, ChainApiMessage},
-	overseer, ActiveLeavesUpdate, FromOverseer, OverseerSignal, SpawnedSubsystem, SubsystemContext,
-	SubsystemError,
+	overseer, ActiveLeavesUpdate, FromOrchestra, OverseerSignal, SpawnedSubsystem, SubsystemError,
+};
+use polkadot_node_subsystem_util as util;
+use polkadot_primitives::{
+	BlockNumber, CandidateEvent, CandidateHash, CandidateReceipt, Hash, Header, ValidatorIndex,
 };
 
 mod metrics;
@@ -62,7 +68,7 @@ const PRUNE_BY_TIME_PREFIX: &[u8; 13] = b"prune_by_time";
 
 // We have some keys we want to map to empty values because existence of the key is enough. We use this because
 // rocksdb doesn't support empty values.
-const TOMBSTONE_VALUE: &[u8] = &*b" ";
+const TOMBSTONE_VALUE: &[u8] = b" ";
 
 /// Unavailable blocks are kept for 1 hour.
 const KEEP_UNAVAILABLE_FOR: Duration = Duration::from_secs(60 * 60);
@@ -355,6 +361,9 @@ pub enum Error {
 	#[error(transparent)]
 	Subsystem(#[from] SubsystemError),
 
+	#[error("Context signal channel closed")]
+	ContextChannelClosed,
+
 	#[error(transparent)]
 	Time(#[from] SystemTimeError),
 
@@ -374,6 +383,7 @@ impl Error {
 			Self::Io(_) => true,
 			Self::Oneshot(_) => true,
 			Self::CustomDatabase => true,
+			Self::ContextChannelClosed => true,
 			_ => false,
 		}
 	}
@@ -448,16 +458,23 @@ pub struct AvailabilityStoreSubsystem {
 	finalized_number: Option<BlockNumber>,
 	metrics: Metrics,
 	clock: Box<dyn Clock>,
+	sync_oracle: Box<dyn SyncOracle + Send + Sync>,
 }
 
 impl AvailabilityStoreSubsystem {
 	/// Create a new `AvailabilityStoreSubsystem` with a given config on disk.
-	pub fn new(db: Arc<dyn Database>, config: Config, metrics: Metrics) -> Self {
+	pub fn new(
+		db: Arc<dyn Database>,
+		config: Config,
+		sync_oracle: Box<dyn SyncOracle + Send + Sync>,
+		metrics: Metrics,
+	) -> Self {
 		Self::with_pruning_config_and_clock(
 			db,
 			config,
 			PruningConfig::default(),
 			Box::new(SystemClock),
+			sync_oracle,
 			metrics,
 		)
 	}
@@ -468,6 +485,7 @@ impl AvailabilityStoreSubsystem {
 		config: Config,
 		pruning_config: PruningConfig,
 		clock: Box<dyn Clock>,
+		sync_oracle: Box<dyn SyncOracle + Send + Sync>,
 		metrics: Metrics,
 	) -> Self {
 		Self {
@@ -477,6 +495,7 @@ impl AvailabilityStoreSubsystem {
 			metrics,
 			clock,
 			known_blocks: KnownUnfinalizedBlocks::default(),
+			sync_oracle,
 			finalized_number: None,
 		}
 	}
@@ -515,27 +534,29 @@ impl KnownUnfinalizedBlocks {
 	}
 }
 
-impl<Context> overseer::Subsystem<Context, SubsystemError> for AvailabilityStoreSubsystem
-where
-	Context: SubsystemContext<Message = AvailabilityStoreMessage>,
-	Context: overseer::SubsystemContext<Message = AvailabilityStoreMessage>,
-{
+#[overseer::subsystem(AvailabilityStore, error=SubsystemError, prefix=self::overseer)]
+impl<Context> AvailabilityStoreSubsystem {
 	fn start(self, ctx: Context) -> SpawnedSubsystem {
-		let future = run(self, ctx).map(|_| Ok(())).boxed();
+		let future = run::<Context>(self, ctx).map(|_| Ok(())).boxed();
 
 		SpawnedSubsystem { name: "availability-store-subsystem", future }
 	}
 }
 
-async fn run<Context>(mut subsystem: AvailabilityStoreSubsystem, mut ctx: Context)
-where
-	Context: SubsystemContext<Message = AvailabilityStoreMessage>,
-	Context: overseer::SubsystemContext<Message = AvailabilityStoreMessage>,
-{
+#[overseer::contextbounds(AvailabilityStore, prefix = self::overseer)]
+async fn run<Context>(mut subsystem: AvailabilityStoreSubsystem, mut ctx: Context) {
 	let mut next_pruning = Delay::new(subsystem.pruning_config.pruning_interval).fuse();
-
+	// Pruning interval is in the order of minutes so we shouldn't have more than one task running
+	// at one moment in time, so 10 should be more than enough.
+	let (mut pruning_result_tx, mut pruning_result_rx) = channel(10);
 	loop {
-		let res = run_iteration(&mut ctx, &mut subsystem, &mut next_pruning).await;
+		let res = run_iteration(
+			&mut ctx,
+			&mut subsystem,
+			&mut next_pruning,
+			(&mut pruning_result_tx, &mut pruning_result_rx),
+		)
+		.await;
 		match res {
 			Err(e) => {
 				e.trace();
@@ -552,20 +573,21 @@ where
 	}
 }
 
+#[overseer::contextbounds(AvailabilityStore, prefix = self::overseer)]
 async fn run_iteration<Context>(
 	ctx: &mut Context,
 	subsystem: &mut AvailabilityStoreSubsystem,
 	mut next_pruning: &mut future::Fuse<Delay>,
-) -> Result<bool, Error>
-where
-	Context: SubsystemContext<Message = AvailabilityStoreMessage>,
-	Context: overseer::SubsystemContext<Message = AvailabilityStoreMessage>,
-{
+	(pruning_result_tx, pruning_result_rx): (
+		&mut MpscSender<Result<(), Error>>,
+		&mut MpscReceiver<Result<(), Error>>,
+	),
+) -> Result<bool, Error> {
 	select! {
 		incoming = ctx.recv().fuse() => {
-			match incoming? {
-				FromOverseer::Signal(OverseerSignal::Conclude) => return Ok(true),
-				FromOverseer::Signal(OverseerSignal::ActiveLeaves(
+			match incoming.map_err(|_| Error::ContextChannelClosed)? {
+				FromOrchestra::Signal(OverseerSignal::Conclude) => return Ok(true),
+				FromOrchestra::Signal(OverseerSignal::ActiveLeaves(
 					ActiveLeavesUpdate { activated, .. })
 				) => {
 					for activated in activated.into_iter() {
@@ -573,9 +595,22 @@ where
 						process_block_activated(ctx, subsystem, activated.hash).await?;
 					}
 				}
-				FromOverseer::Signal(OverseerSignal::BlockFinalized(hash, number)) => {
+				FromOrchestra::Signal(OverseerSignal::BlockFinalized(hash, number)) => {
 					let _timer = subsystem.metrics.time_process_block_finalized();
 
+					if !subsystem.known_blocks.is_known(&hash) {
+						// If we haven't processed this block yet,
+						// make sure we write the metadata about the
+						// candidates backed in this finalized block.
+						// Otherwise, we won't be able to store our chunk
+						// for these candidates.
+						if !subsystem.sync_oracle.is_major_syncing() {
+							// If we're major syncing, processing finalized
+							// blocks might take quite a very long time
+							// and make the subsystem unresponsive.
+							process_block_activated(ctx, subsystem, hash).await?;
+						}
+					}
 					subsystem.finalized_number = Some(number);
 					subsystem.known_blocks.prune_finalized(number);
 					process_block_finalized(
@@ -585,7 +620,7 @@ where
 						number,
 					).await?;
 				}
-				FromOverseer::Communication { msg } => {
+				FromOrchestra::Communication { msg } => {
 					let _timer = subsystem.metrics.time_process_message();
 					process_message(subsystem, msg)?;
 				}
@@ -595,24 +630,57 @@ where
 			// It's important to set the delay before calling `prune_all` because an error in `prune_all`
 			// could lead to the delay not being set again. Then we would never prune anything anymore.
 			*next_pruning = Delay::new(subsystem.pruning_config.pruning_interval).fuse();
-
-			let _timer = subsystem.metrics.time_pruning();
-			prune_all(&subsystem.db, &subsystem.config, &*subsystem.clock)?;
-		}
+			start_prune_all(ctx, subsystem, pruning_result_tx.clone()).await?;
+		},
+		// Received the prune result and propagate the errors, so that in case of a fatal error
+		// the main loop of the subsystem can exit graciously.
+		result = pruning_result_rx.next() => {
+			if let Some(result) = result {
+				result?;
+			}
+		},
 	}
 
 	Ok(false)
 }
 
+// Start prune-all on a separate thread, so that in the case when the operation takes
+// longer than expected we don't keep the whole subsystem blocked.
+// See: https://github.com/paritytech/polkadot/issues/7237 for more details.
+#[overseer::contextbounds(AvailabilityStore, prefix = self::overseer)]
+async fn start_prune_all<Context>(
+	ctx: &mut Context,
+	subsystem: &mut AvailabilityStoreSubsystem,
+	mut pruning_result_tx: MpscSender<Result<(), Error>>,
+) -> Result<(), Error> {
+	let metrics = subsystem.metrics.clone();
+	let db = subsystem.db.clone();
+	let config = subsystem.config;
+	let time_now = subsystem.clock.now()?;
+
+	ctx.spawn_blocking(
+		"av-store-prunning",
+		Box::pin(async move {
+			let _timer = metrics.time_pruning();
+
+			gum::debug!(target: LOG_TARGET, "Prunning started");
+			let result = prune_all(&db, &config, time_now);
+
+			if let Err(err) = pruning_result_tx.send(result).await {
+				// This usually means that the node is closing down, log it just in case
+				gum::debug!(target: LOG_TARGET, ?err, "Failed to send prune_all result",);
+			}
+		}),
+	)?;
+	Ok(())
+}
+
+#[overseer::contextbounds(AvailabilityStore, prefix = self::overseer)]
 async fn process_block_activated<Context>(
 	ctx: &mut Context,
 	subsystem: &mut AvailabilityStoreSubsystem,
 	activated: Hash,
-) -> Result<(), Error>
-where
-	Context: SubsystemContext<Message = AvailabilityStoreMessage>,
-	Context: overseer::SubsystemContext<Message = AvailabilityStoreMessage>,
-{
+) -> Result<(), Error> {
 	let now = subsystem.clock.now()?;
 
 	let block_header = {
@@ -659,6 +727,7 @@ where
 	Ok(())
 }
 
+#[overseer::contextbounds(AvailabilityStore, prefix = self::overseer)]
 async fn process_new_head<Context>(
 	ctx: &mut Context,
 	db: &Arc<dyn Database>,
@@ -668,11 +737,7 @@ async fn process_new_head<Context>(
 	now: Duration,
 	hash: Hash,
 	header: Header,
-) -> Result<(), Error>
-where
-	Context: SubsystemContext<Message = AvailabilityStoreMessage>,
-	Context: overseer::SubsystemContext<Message = AvailabilityStoreMessage>,
-{
+) -> Result<(), Error> {
 	let candidate_events = util::request_candidate_events(hash, ctx.sender()).await.await??;
 
 	// We need to request the number of validators based on the parent state,
@@ -804,22 +869,20 @@ fn note_block_included(
 macro_rules! peek_num {
 	($iter:ident) => {
 		match $iter.peek() {
-			Some((k, _)) => decode_unfinalized_key(&k[..]).ok().map(|(b, _, _)| b),
-			None => None,
+			Some(Ok((k, _))) => Ok(decode_unfinalized_key(&k[..]).ok().map(|(b, _, _)| b)),
+			Some(Err(_)) => Err($iter.next().expect("peek returned Some(Err); qed").unwrap_err()),
+			None => Ok(None),
 		}
 	};
 }
 
+#[overseer::contextbounds(AvailabilityStore, prefix = self::overseer)]
 async fn process_block_finalized<Context>(
 	ctx: &mut Context,
 	subsystem: &AvailabilityStoreSubsystem,
 	finalized_hash: Hash,
 	finalized_number: BlockNumber,
-) -> Result<(), Error>
-where
-	Context: SubsystemContext<Message = AvailabilityStoreMessage>,
-	Context: overseer::SubsystemContext<Message = AvailabilityStoreMessage>,
-{
+) -> Result<(), Error> {
 	let now = subsystem.clock.now()?;
 
 	let mut next_possible_batch = 0;
@@ -834,10 +897,10 @@ where
 			let mut iter = subsystem
 				.db
 				.iter_with_prefix(subsystem.config.col_meta, &start_prefix)
-				.take_while(|(k, _)| &k[..] < &end_prefix[..])
+				.take_while(|r| r.as_ref().map_or(true, |(k, _v)| &k[..] < &end_prefix[..]))
 				.peekable();
 
-			match peek_num!(iter) {
+			match peek_num!(iter)? {
 				None => break, // end of iterator.
 				Some(n) => n,
 			}
@@ -882,10 +945,10 @@ where
 		let iter = subsystem
 			.db
 			.iter_with_prefix(subsystem.config.col_meta, &start_prefix)
-			.take_while(|(k, _)| &k[..] < &end_prefix[..])
+			.take_while(|r| r.as_ref().map_or(true, |(k, _v)| &k[..] < &end_prefix[..]))
 			.peekable();
 
-		let batch = load_all_at_finalized_height(iter, batch_num, batch_finalized_hash);
+		let batch = load_all_at_finalized_height(iter, batch_num, batch_finalized_hash)?;
 
 		// Now that we've iterated over the entire batch at this finalized height,
 		// update the meta.
@@ -905,22 +968,22 @@ where
 // loads all candidates at the finalized height and maps them to `true` if finalized
 // and `false` if unfinalized.
 fn load_all_at_finalized_height(
-	mut iter: std::iter::Peekable<impl Iterator<Item = (Box<[u8]>, Box<[u8]>)>>,
+	mut iter: std::iter::Peekable<impl Iterator<Item = io::Result<util::database::DBKeyValue>>>,
 	block_number: BlockNumber,
 	finalized_hash: Hash,
-) -> impl IntoIterator<Item = (CandidateHash, bool)> {
+) -> io::Result<impl IntoIterator<Item = (CandidateHash, bool)>> {
 	// maps candidate hashes to true if finalized, false otherwise.
 	let mut candidates = HashMap::new();
 
 	// Load all candidates that were included at this height.
 	loop {
-		match peek_num!(iter) {
+		match peek_num!(iter)? {
 			None => break,                         // end of iterator.
 			Some(n) if n != block_number => break, // end of batch.
 			_ => {},
 		}
 
-		let (k, _v) = iter.next().expect("`peek` used to check non-empty; qed");
+		let (k, _v) = iter.next().expect("`peek` used to check non-empty; qed")?;
 		let (_, block_hash, candidate_hash) =
 			decode_unfinalized_key(&k[..]).expect("`peek_num` checks validity of key; qed");
 
@@ -931,7 +994,7 @@ fn load_all_at_finalized_height(
 		}
 	}
 
-	candidates
+	Ok(candidates)
 }
 
 fn update_blocks_at_finalized_height(
@@ -1042,6 +1105,25 @@ fn process_message(
 			let _timer = subsystem.metrics.time_get_chunk();
 			let _ =
 				tx.send(load_chunk(&subsystem.db, &subsystem.config, &candidate, validator_index)?);
+		},
+		AvailabilityStoreMessage::QueryChunkSize(candidate, tx) => {
+			let meta = load_meta(&subsystem.db, &subsystem.config, &candidate)?;
+
+			let validator_index = meta.map_or(None, |meta| meta.chunks_stored.first_one());
+
+			let maybe_chunk_size = if let Some(validator_index) = validator_index {
+				load_chunk(
+					&subsystem.db,
+					&subsystem.config,
+					&candidate,
+					ValidatorIndex(validator_index as u32),
+				)?
+				.map(|erasure_chunk| erasure_chunk.chunk.len())
+			} else {
+				None
+			};
+
+			let _ = tx.send(maybe_chunk_size);
 		},
 		AvailabilityStoreMessage::QueryAllChunks(candidate, tx) => {
 			match load_meta(&subsystem.db, &subsystem.config, &candidate)? {
@@ -1222,16 +1304,16 @@ fn store_available_data(
 	Ok(())
 }
 
-fn prune_all(db: &Arc<dyn Database>, config: &Config, clock: &dyn Clock) -> Result<(), Error> {
-	let now = clock.now()?;
+fn prune_all(db: &Arc<dyn Database>, config: &Config, now: Duration) -> Result<(), Error> {
 	let (range_start, range_end) = pruning_range(now);
 
 	let mut tx = DBTransaction::new();
 	let iter = db
 		.iter_with_prefix(config.col_meta, &range_start[..])
-		.take_while(|(k, _)| &k[..] < &range_end[..]);
+		.take_while(|r| r.as_ref().map_or(true, |(k, _v)| &k[..] < &range_end[..]));
 
-	for (k, _v) in iter {
+	for r in iter {
+		let (k, _v) = r?;
 		tx.delete(config.col_meta, &k[..]);
 
 		let (_, candidate_hash) = match decode_pruning_key(&k[..]) {

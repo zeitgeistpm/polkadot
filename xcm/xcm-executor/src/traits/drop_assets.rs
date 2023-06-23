@@ -1,4 +1,4 @@
-// Copyright 2020 Parity Technologies (UK) Ltd.
+// Copyright (C) Parity Technologies (UK) Ltd.
 // This file is part of Polkadot.
 
 // Polkadot is free software: you can redistribute it and/or modify
@@ -16,17 +16,17 @@
 
 use crate::Assets;
 use core::marker::PhantomData;
-use frame_support::{traits::Contains, weights::Weight};
-use xcm::latest::{MultiAssets, MultiLocation};
+use frame_support::traits::Contains;
+use xcm::latest::{MultiAssets, MultiLocation, Weight, XcmContext};
 
 /// Define a handler for when some non-empty `Assets` value should be dropped.
 pub trait DropAssets {
 	/// Handler for receiving dropped assets. Returns the weight consumed by this operation.
-	fn drop_assets(origin: &MultiLocation, assets: Assets) -> Weight;
+	fn drop_assets(origin: &MultiLocation, assets: Assets, context: &XcmContext) -> Weight;
 }
 impl DropAssets for () {
-	fn drop_assets(_origin: &MultiLocation, _assets: Assets) -> Weight {
-		0
+	fn drop_assets(_origin: &MultiLocation, _assets: Assets, _context: &XcmContext) -> Weight {
+		Weight::zero()
 	}
 }
 
@@ -35,11 +35,11 @@ impl DropAssets for () {
 pub struct FilterAssets<D, A>(PhantomData<(D, A)>);
 
 impl<D: DropAssets, A: Contains<Assets>> DropAssets for FilterAssets<D, A> {
-	fn drop_assets(origin: &MultiLocation, assets: Assets) -> Weight {
+	fn drop_assets(origin: &MultiLocation, assets: Assets, context: &XcmContext) -> Weight {
 		if A::contains(&assets) {
-			D::drop_assets(origin, assets)
+			D::drop_assets(origin, assets, context)
 		} else {
-			0
+			Weight::zero()
 		}
 	}
 }
@@ -50,11 +50,11 @@ impl<D: DropAssets, A: Contains<Assets>> DropAssets for FilterAssets<D, A> {
 pub struct FilterOrigin<D, O>(PhantomData<(D, O)>);
 
 impl<D: DropAssets, O: Contains<MultiLocation>> DropAssets for FilterOrigin<D, O> {
-	fn drop_assets(origin: &MultiLocation, assets: Assets) -> Weight {
+	fn drop_assets(origin: &MultiLocation, assets: Assets, context: &XcmContext) -> Weight {
 		if O::contains(origin) {
-			D::drop_assets(origin, assets)
+			D::drop_assets(origin, assets, context)
 		} else {
-			0
+			Weight::zero()
 		}
 	}
 }
@@ -63,14 +63,24 @@ impl<D: DropAssets, O: Contains<MultiLocation>> DropAssets for FilterOrigin<D, O
 pub trait ClaimAssets {
 	/// Claim any assets available to `origin` and return them in a single `Assets` value, together
 	/// with the weight used by this operation.
-	fn claim_assets(origin: &MultiLocation, ticket: &MultiLocation, what: &MultiAssets) -> bool;
+	fn claim_assets(
+		origin: &MultiLocation,
+		ticket: &MultiLocation,
+		what: &MultiAssets,
+		context: &XcmContext,
+	) -> bool;
 }
 
 #[impl_trait_for_tuples::impl_for_tuples(30)]
 impl ClaimAssets for Tuple {
-	fn claim_assets(origin: &MultiLocation, ticket: &MultiLocation, what: &MultiAssets) -> bool {
+	fn claim_assets(
+		origin: &MultiLocation,
+		ticket: &MultiLocation,
+		what: &MultiAssets,
+		context: &XcmContext,
+	) -> bool {
 		for_tuples!( #(
-			if Tuple::claim_assets(origin, ticket, what) {
+			if Tuple::claim_assets(origin, ticket, what, context) {
 				return true;
 			}
 		)* );

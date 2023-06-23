@@ -1,4 +1,4 @@
-// Copyright 2020 Parity Technologies (UK) Ltd.
+// Copyright (C) Parity Technologies (UK) Ltd.
 // This file is part of Polkadot.
 
 // Polkadot is free software: you can redistribute it and/or modify
@@ -14,7 +14,7 @@
 // You should have received a copy of the GNU General Public License
 // along with Polkadot.  If not, see <http://www.gnu.org/licenses/>.
 
-use polkadot_node_subsystem_util::metrics::{prometheus, Metrics as MetricsTrait};
+use polkadot_node_metrics::metrics::{prometheus, Metrics as MetricsTrait};
 
 /// Approval Distribution metrics.
 #[derive(Default, Clone)]
@@ -25,6 +25,8 @@ struct MetricsInner {
 	assignments_imported_total: prometheus::Counter<prometheus::U64>,
 	approvals_imported_total: prometheus::Counter<prometheus::U64>,
 	unified_with_peer_total: prometheus::Counter<prometheus::U64>,
+	aggression_l1_messages_total: prometheus::Counter<prometheus::U64>,
+	aggression_l2_messages_total: prometheus::Counter<prometheus::U64>,
 
 	time_unify_with_peer: prometheus::Histogram,
 	time_import_pending_now_known: prometheus::Histogram,
@@ -69,6 +71,18 @@ impl Metrics {
 			.as_ref()
 			.map(|metrics| metrics.time_awaiting_approval_voting.start_timer())
 	}
+
+	pub(crate) fn on_aggression_l1(&self) {
+		if let Some(metrics) = &self.0 {
+			metrics.aggression_l1_messages_total.inc();
+		}
+	}
+
+	pub(crate) fn on_aggression_l2(&self) {
+		if let Some(metrics) = &self.0 {
+			metrics.aggression_l2_messages_total.inc();
+		}
+	}
 }
 
 impl MetricsTrait for Metrics {
@@ -95,25 +109,39 @@ impl MetricsTrait for Metrics {
 				)?,
 				registry,
 			)?,
+			aggression_l1_messages_total: prometheus::register(
+				prometheus::Counter::new(
+					"polkadot_parachain_approval_distribution_aggression_l1_messages_total",
+					"Number of messages in approval distribution for which aggression L1 has been triggered",
+				)?,
+				registry,
+			)?,
+			aggression_l2_messages_total: prometheus::register(
+				prometheus::Counter::new(
+					"polkadot_parachain_approval_distribution_aggression_l2_messages_total",
+					"Number of messages in approval distribution for which aggression L2 has been triggered",
+				)?,
+				registry,
+			)?,
 			time_unify_with_peer: prometheus::register(
 				prometheus::Histogram::with_opts(prometheus::HistogramOpts::new(
 					"polkadot_parachain_time_unify_with_peer",
 					"Time spent within fn `unify_with_peer`.",
-				))?,
+				).buckets(vec![0.000625, 0.00125,0.0025, 0.005, 0.0075, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0,]))?,
 				registry,
 			)?,
 			time_import_pending_now_known: prometheus::register(
 				prometheus::Histogram::with_opts(prometheus::HistogramOpts::new(
 					"polkadot_parachain_time_import_pending_now_known",
 					"Time spent on importing pending assignments and approvals.",
-				))?,
+				).buckets(vec![0.0001, 0.0004, 0.0016, 0.0064, 0.0256, 0.1024, 0.4096, 1.6384, 3.2768, 4.9152, 6.5536,]))?,
 				registry,
 			)?,
 			time_awaiting_approval_voting: prometheus::register(
 				prometheus::Histogram::with_opts(prometheus::HistogramOpts::new(
 					"polkadot_parachain_time_awaiting_approval_voting",
 					"Time spent awaiting a reply from the Approval Voting Subsystem.",
-				))?,
+				).buckets(vec![0.0001, 0.0004, 0.0016, 0.0064, 0.0256, 0.1024, 0.4096, 1.6384, 3.2768, 4.9152, 6.5536,]))?,
 				registry,
 			)?,
 		};

@@ -1,4 +1,4 @@
-// Copyright 2021 Parity Technologies (UK) Ltd.
+// Copyright (C) Parity Technologies (UK) Ltd.
 // This file is part of Polkadot.
 
 // Polkadot is free software: you can redistribute it and/or modify
@@ -24,12 +24,14 @@ use polkadot_node_network_protocol::request_response::{
 	OutgoingRequest, Recipient,
 };
 use polkadot_node_primitives::PoV;
-use polkadot_node_subsystem_util::runtime::RuntimeInfo;
-use polkadot_primitives::v2::{AuthorityDiscoveryId, CandidateHash, Hash, ValidatorIndex};
-use polkadot_subsystem::{
+use polkadot_node_subsystem::{
 	jaeger,
-	messages::{IfDisconnected, NetworkBridgeMessage},
-	SubsystemContext,
+	messages::{IfDisconnected, NetworkBridgeTxMessage},
+	overseer,
+};
+use polkadot_node_subsystem_util::runtime::RuntimeInfo;
+use polkadot_primitives::{
+	AuthorityDiscoveryId, CandidateHash, Hash, Id as ParaId, ValidatorIndex,
 };
 
 use crate::{
@@ -39,19 +41,29 @@ use crate::{
 };
 
 /// Start background worker for taking care of fetching the requested `PoV` from the network.
+#[overseer::contextbounds(AvailabilityDistribution, prefix = self::overseer)]
 pub async fn fetch_pov<Context>(
 	ctx: &mut Context,
 	runtime: &mut RuntimeInfo,
 	parent: Hash,
 	from_validator: ValidatorIndex,
+	para_id: ParaId,
 	candidate_hash: CandidateHash,
 	pov_hash: Hash,
 	tx: oneshot::Sender<PoV>,
 	metrics: Metrics,
-) -> Result<()>
-where
-	Context: SubsystemContext,
-{
+	span: &jaeger::Span,
+) -> Result<()> {
+	let _span = span
+		.child("fetch-pov")
+		.with_trace_id(candidate_hash)
+		.with_validator_index(from_validator)
+		.with_candidate(candidate_hash)
+		.with_para_id(para_id)
+		.with_relay_parent(parent)
+		.with_string_tag("pov-hash", format!("{:?}", pov_hash))
+		.with_stage(jaeger::Stage::AvailabilityDistribution);
+
 	let info = &runtime.get_session_info(ctx.sender(), parent).await?.session_info;
 	let authority_id = info
 		.discovery_keys
@@ -62,20 +74,18 @@ where
 		Recipient::Authority(authority_id.clone()),
 		PoVFetchingRequest { candidate_hash },
 	);
-	let full_req = Requests::PoVFetching(req);
+	let full_req = Requests::PoVFetchingV1(req);
 
-	ctx.send_message(NetworkBridgeMessage::SendRequests(
+	ctx.send_message(NetworkBridgeTxMessage::SendRequests(
 		vec![full_req],
 		IfDisconnected::ImmediateError,
 	))
 	.await;
 
-	let span = jaeger::Span::new(candidate_hash, "fetch-pov")
-		.with_validator_index(from_validator)
-		.with_relay_parent(parent);
 	ctx.spawn(
 		"pov-fetcher",
-		fetch_pov_job(pov_hash, authority_id, pending_response.boxed(), span, tx, metrics).boxed(),
+		fetch_pov_job(para_id, pov_hash, authority_id, pending_response.boxed(), tx, metrics)
+			.boxed(),
 	)
 	.map_err(|e| FatalError::SpawnTask(e))?;
 	Ok(())
@@ -83,15 +93,15 @@ where
 
 /// Future to be spawned for taking care of handling reception and sending of PoV.
 async fn fetch_pov_job(
+	para_id: ParaId,
 	pov_hash: Hash,
 	authority_id: AuthorityDiscoveryId,
 	pending_response: BoxFuture<'static, std::result::Result<PoVFetchingResponse, RequestError>>,
-	span: jaeger::Span,
 	tx: oneshot::Sender<PoV>,
 	metrics: Metrics,
 ) {
-	if let Err(err) = do_fetch_pov(pov_hash, pending_response, span, tx, metrics).await {
-		gum::warn!(target: LOG_TARGET, ?err, ?pov_hash, ?authority_id, "fetch_pov_job");
+	if let Err(err) = do_fetch_pov(pov_hash, pending_response, tx, metrics).await {
+		gum::warn!(target: LOG_TARGET, ?err, ?para_id, ?pov_hash, ?authority_id, "fetch_pov_job");
 	}
 }
 
@@ -99,7 +109,6 @@ async fn fetch_pov_job(
 async fn do_fetch_pov(
 	pov_hash: Hash,
 	pending_response: BoxFuture<'static, std::result::Result<PoVFetchingResponse, RequestError>>,
-	_span: jaeger::Span,
 	tx: oneshot::Sender<PoV>,
 	metrics: Metrics,
 ) -> Result<()> {
@@ -133,11 +142,11 @@ mod tests {
 	use sp_core::testing::TaskExecutor;
 
 	use polkadot_node_primitives::BlockData;
-	use polkadot_primitives::v2::{CandidateHash, Hash, ValidatorIndex};
-	use polkadot_subsystem::messages::{
+	use polkadot_node_subsystem::messages::{
 		AllMessages, AvailabilityDistributionMessage, RuntimeApiMessage, RuntimeApiRequest,
 	};
-	use polkadot_subsystem_testhelpers as test_helpers;
+	use polkadot_node_subsystem_test_helpers as test_helpers;
+	use polkadot_primitives::{CandidateHash, Hash, ValidatorIndex};
 	use test_helpers::mock::make_ferdie_keystore;
 
 	use super::*;
@@ -173,10 +182,12 @@ mod tests {
 				&mut runtime,
 				Hash::default(),
 				ValidatorIndex(0),
+				ParaId::default(),
 				CandidateHash::default(),
 				pov_hash,
 				tx,
 				Metrics::new_dummy(),
+				&jaeger::Span::Disabled,
 			)
 			.await
 			.expect("Should succeed");
@@ -197,10 +208,13 @@ mod tests {
 					)) => {
 						tx.send(Ok(Some(make_session_info()))).unwrap();
 					},
-					AllMessages::NetworkBridge(NetworkBridgeMessage::SendRequests(mut reqs, _)) => {
+					AllMessages::NetworkBridgeTx(NetworkBridgeTxMessage::SendRequests(
+						mut reqs,
+						_,
+					)) => {
 						let req = assert_matches!(
 							reqs.pop(),
-							Some(Requests::PoVFetching(outgoing)) => {outgoing}
+							Some(Requests::PoVFetchingV1(outgoing)) => {outgoing}
 						);
 						req.pending_response
 							.send(Ok(PoVFetchingResponse::PoV(pov.clone()).encode()))

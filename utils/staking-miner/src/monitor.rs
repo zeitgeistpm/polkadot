@@ -1,4 +1,4 @@
-// Copyright 2021 Parity Technologies (UK) Ltd.
+// Copyright (C) Parity Technologies (UK) Ltd.
 // This file is part of Polkadot.
 
 // Polkadot is free software: you can redistribute it and/or modify
@@ -24,7 +24,8 @@ use jsonrpsee::core::Error as RpcError;
 use sc_transaction_pool_api::TransactionStatus;
 use sp_core::storage::StorageKey;
 use sp_runtime::Perbill;
-use tokio::sync::mpsc;
+use std::sync::Arc;
+use tokio::sync::{mpsc, Mutex};
 use EPM::{signed::SubmissionIndicesOf, SignedSubmissionOf};
 
 /// Ensure that now is the signed phase.
@@ -64,7 +65,7 @@ where
 		.map_err::<Error<T>, _>(Into::into)?
 		.unwrap_or_default();
 
-	for (_score, idx) in indices {
+	for (_score, _bn, idx) in indices {
 		let key = StorageKey(EPM::SignedSubmissionsMap::<T>::hashed_key_for(idx));
 
 		if let Some(submission) = rpc
@@ -81,19 +82,36 @@ where
 	Ok(())
 }
 
+/// `true` if `our_score` should pass the onchain `best_score` with the given strategy.
+pub(crate) fn score_passes_strategy(
+	our_score: sp_npos_elections::ElectionScore,
+	best_score: sp_npos_elections::ElectionScore,
+	strategy: SubmissionStrategy,
+) -> bool {
+	match strategy {
+		SubmissionStrategy::Always => true,
+		SubmissionStrategy::IfLeading =>
+			our_score == best_score ||
+				our_score.strict_threshold_better(best_score, Perbill::zero()),
+		SubmissionStrategy::ClaimBetterThan(epsilon) =>
+			our_score.strict_threshold_better(best_score, epsilon),
+		SubmissionStrategy::ClaimNoWorseThan(epsilon) =>
+			!best_score.strict_threshold_better(our_score, epsilon),
+	}
+}
+
 /// Reads all current solutions and checks the scores according to the `SubmissionStrategy`.
-async fn ensure_no_better_solution<T: EPM::Config, B: BlockT>(
+async fn ensure_strategy_met<T: EPM::Config, B: BlockT>(
 	rpc: &SharedRpcClient,
 	at: Hash,
 	score: sp_npos_elections::ElectionScore,
 	strategy: SubmissionStrategy,
+	max_submissions: u32,
 ) -> Result<(), Error<T>> {
-	let epsilon = match strategy {
-		// don't care about current scores.
-		SubmissionStrategy::Always => return Ok(()),
-		SubmissionStrategy::IfLeading => Perbill::zero(),
-		SubmissionStrategy::ClaimBetterThan(epsilon) => epsilon,
-	};
+	// don't care about current scores.
+	if matches!(strategy, SubmissionStrategy::Always) {
+		return Ok(())
+	}
 
 	let indices_key = StorageKey(EPM::SignedSubmissionIndices::<T>::hashed_key().to_vec());
 
@@ -103,14 +121,34 @@ async fn ensure_no_better_solution<T: EPM::Config, B: BlockT>(
 		.map_err::<Error<T>, _>(Into::into)?
 		.unwrap_or_default();
 
-	// BTreeMap is ordered, take last to get the max score.
-	if let Some(curr_max_score) = indices.into_iter().last().map(|(s, _)| s) {
-		if !score.strict_threshold_better(curr_max_score, epsilon) {
-			return Err(Error::StrategyNotSatisfied)
-		}
+	if indices.len() >= max_submissions as usize {
+		log::debug!(target: LOG_TARGET, "The submissions queue is full");
 	}
 
-	Ok(())
+	// default score is all zeros, any score is better than it.
+	let best_score = indices.last().map(|(score, _, _)| *score).unwrap_or_default();
+	log::debug!(target: LOG_TARGET, "best onchain score is {:?}", best_score);
+
+	if score_passes_strategy(score, best_score, strategy) {
+		Ok(())
+	} else {
+		Err(Error::StrategyNotSatisfied)
+	}
+}
+
+async fn get_latest_head<T: EPM::Config>(
+	rpc: &SharedRpcClient,
+	mode: &str,
+) -> Result<Hash, Error<T>> {
+	if mode == "head" {
+		match rpc.block_hash(None).await {
+			Ok(Some(hash)) => Ok(hash),
+			Ok(None) => Err(Error::Other("Best head not found".into())),
+			Err(e) => Err(e.into()),
+		}
+	} else {
+		rpc.finalized_head().await.map_err(Into::into)
+	}
 }
 
 macro_rules! monitor_cmd_for { ($runtime:tt) => { paste::paste! {
@@ -133,18 +171,13 @@ macro_rules! monitor_cmd_for { ($runtime:tt) => { paste::paste! {
 
 		let mut subscription = heads_subscription().await?;
 		let (tx, mut rx) = mpsc::unbounded_channel::<StakingMinerError>();
+		let submit_lock = Arc::new(Mutex::new(()));
 
 		loop {
 			let at = tokio::select! {
 				maybe_rp = subscription.next() => {
 					match maybe_rp {
 						Some(Ok(r)) => r,
-						// Custom `jsonrpsee` message sent by the server if the subscription was closed on the server side.
-						Some(Err(RpcError::SubscriptionClosed(reason))) => {
-							log::warn!(target: LOG_TARGET, "subscription to `subscribeNewHeads/subscribeFinalizedHeads` terminated: {:?}. Retrying..", reason);
-							subscription = heads_subscription().await?;
-							continue;
-						}
 						Some(Err(e)) => {
 							log::error!(target: LOG_TARGET, "subscription failed to decode Header {:?}, this is bug please file an issue", e);
 							return Err(e.into());
@@ -170,9 +203,8 @@ macro_rules! monitor_cmd_for { ($runtime:tt) => { paste::paste! {
 			// Spawn task and non-recoverable errors are sent back to the main task
 			// such as if the connection has been closed.
 			tokio::spawn(
-				send_and_watch_extrinsic(rpc.clone(), tx.clone(), at, signer.clone(), config.clone())
+				send_and_watch_extrinsic(rpc.clone(), tx.clone(), at, signer.clone(), config.clone(), submit_lock.clone())
 			);
-
 		}
 
 		/// Construct extrinsic at given block and watch it.
@@ -182,6 +214,7 @@ macro_rules! monitor_cmd_for { ($runtime:tt) => { paste::paste! {
 			at: Header,
 			signer: Signer,
 			config: MonitorConfig,
+			submit_lock: Arc<Mutex<()>>,
 		) {
 
 			async fn flatten<T>(
@@ -199,7 +232,7 @@ macro_rules! monitor_cmd_for { ($runtime:tt) => { paste::paste! {
 
 			// block on this because if this fails there is no way to recover from
 			// that error i.e, upgrade/downgrade required.
-			if let Err(err) = crate::check_versions::<Runtime>(&rpc).await {
+			if let Err(err) = crate::check_versions::<Runtime>(&rpc, false).await {
 				let _ = tx.send(err.into());
 				return;
 			}
@@ -212,6 +245,8 @@ macro_rules! monitor_cmd_for { ($runtime:tt) => { paste::paste! {
 				ensure_signed_phase::<Runtime, Block>(&rpc1, hash).await
 			});
 
+			tokio::time::sleep(std::time::Duration::from_secs(config.delay as u64)).await;
+
 			let no_prev_sol_fut = tokio::spawn(async move {
 				ensure_no_previous_solution::<Runtime, Block>(&rpc2, hash, &account).await
 			});
@@ -221,6 +256,8 @@ macro_rules! monitor_cmd_for { ($runtime:tt) => { paste::paste! {
 				log::debug!(target: LOG_TARGET, "Skipping block {}; {}", at.number, err);
 				return;
 			}
+
+			let _lock = submit_lock.lock().await;
 
 			let mut ext = match crate::create_election_ext::<Runtime, Block>(rpc.clone(), Some(hash), vec![]).await {
 				Ok(ext) => ext,
@@ -269,20 +306,42 @@ macro_rules! monitor_cmd_for { ($runtime:tt) => { paste::paste! {
 
 			let rpc1 = rpc.clone();
 			let rpc2 = rpc.clone();
+			let rpc3 = rpc.clone();
 
-			let ensure_no_better_fut = tokio::spawn(async move {
-				ensure_no_better_solution::<Runtime, Block>(&rpc1, hash, score, config.submission_strategy).await
+			let latest_head = match get_latest_head::<Runtime>(&rpc, &config.listen).await {
+				Ok(hash) => hash,
+				Err(e) => {
+					log::debug!(target: LOG_TARGET, "Skipping to submit at block {}; {}", at.number, e);
+					return;
+				}
+			};
+
+			let ensure_strategy_met_fut = tokio::spawn(async move {
+				ensure_strategy_met::<Runtime, Block>(
+					&rpc1,
+					latest_head,
+					score,
+					config.submission_strategy,
+					SignedMaxSubmissions::get()
+				).await
 			});
 
 			let ensure_signed_phase_fut = tokio::spawn(async move {
-				ensure_signed_phase::<Runtime, Block>(&rpc2, hash).await
+				ensure_signed_phase::<Runtime, Block>(&rpc2, latest_head).await
+			});
+
+			let account = signer.account.clone();
+			let no_prev_sol_fut = tokio::spawn(async move {
+				ensure_no_previous_solution::<Runtime, Block>(&rpc3, latest_head, &account).await
 			});
 
 			// Run the calls in parallel and return once all has completed or any failed.
-			if tokio::try_join!(
-				flatten(ensure_no_better_fut),
+			if let Err(err) = tokio::try_join!(
+				flatten(ensure_strategy_met_fut),
 				flatten(ensure_signed_phase_fut),
-			).is_err() {
+				flatten(no_prev_sol_fut),
+			) {
+				log::debug!(target: LOG_TARGET, "Skipping to submit at block {}; {}", at.number, err);
 				return;
 			}
 
@@ -312,15 +371,6 @@ macro_rules! monitor_cmd_for { ($runtime:tt) => { paste::paste! {
 			while let Some(rp) = tx_subscription.next().await {
 				let status_update = match rp {
 					Ok(r) => r,
-					// Custom `jsonrpsee` message sent by the server if the subscription was closed on the server side.
-					Err(RpcError::SubscriptionClosed(reason)) => {
-						log::warn!(
-							target: LOG_TARGET,
-							"tx subscription closed by the server: {:?}; skip block: {}",
-							reason, at.number
-						);
-						return;
-					},
 					Err(e) => {
 						log::error!(target: LOG_TARGET, "subscription failed to decode TransactionStatus {:?}, this is a bug please file an issue", e);
 						let _ = tx.send(e.into());
@@ -333,14 +383,14 @@ macro_rules! monitor_cmd_for { ($runtime:tt) => { paste::paste! {
 					TransactionStatus::Ready |
 					TransactionStatus::Broadcast(_) |
 					TransactionStatus::Future => continue,
-					TransactionStatus::InBlock(hash) => {
+					TransactionStatus::InBlock((hash, _)) => {
 						log::info!(target: LOG_TARGET, "included at {:?}", hash);
 						let key = StorageKey(
 							frame_support::storage::storage_prefix(b"System", b"Events").to_vec(),
 						);
 
 						let events = match rpc.get_storage_and_decode::<
-							Vec<frame_system::EventRecord<Event, <Block as BlockT>::Hash>>,
+							Vec<frame_system::EventRecord<RuntimeEvent, <Block as BlockT>::Hash>>,
 						>(&key, Some(hash))
 						.await {
 							Ok(rp) => rp.unwrap_or_default(),
@@ -362,7 +412,7 @@ macro_rules! monitor_cmd_for { ($runtime:tt) => { paste::paste! {
 					TransactionStatus::Retracted(hash) => {
 						log::info!(target: LOG_TARGET, "Retracted at {:?}", hash);
 					},
-					TransactionStatus::Finalized(hash) => {
+					TransactionStatus::Finalized((hash, _)) => {
 						log::info!(target: LOG_TARGET, "Finalized at {:?}", hash);
 						break
 					},
@@ -383,3 +433,46 @@ macro_rules! monitor_cmd_for { ($runtime:tt) => { paste::paste! {
 monitor_cmd_for!(polkadot);
 monitor_cmd_for!(kusama);
 monitor_cmd_for!(westend);
+
+#[cfg(test)]
+pub mod tests {
+	use super::*;
+
+	#[test]
+	fn score_passes_strategy_works() {
+		let s = |x| sp_npos_elections::ElectionScore { minimal_stake: x, ..Default::default() };
+		let two = Perbill::from_percent(2);
+
+		// anything passes Always
+		assert!(score_passes_strategy(s(0), s(0), SubmissionStrategy::Always));
+		assert!(score_passes_strategy(s(5), s(0), SubmissionStrategy::Always));
+		assert!(score_passes_strategy(s(5), s(10), SubmissionStrategy::Always));
+
+		// if leading
+		assert!(score_passes_strategy(s(0), s(0), SubmissionStrategy::IfLeading));
+		assert!(score_passes_strategy(s(1), s(0), SubmissionStrategy::IfLeading));
+		assert!(score_passes_strategy(s(2), s(0), SubmissionStrategy::IfLeading));
+		assert!(!score_passes_strategy(s(5), s(10), SubmissionStrategy::IfLeading));
+		assert!(!score_passes_strategy(s(9), s(10), SubmissionStrategy::IfLeading));
+		assert!(score_passes_strategy(s(10), s(10), SubmissionStrategy::IfLeading));
+
+		// if better by 2%
+		assert!(!score_passes_strategy(s(50), s(100), SubmissionStrategy::ClaimBetterThan(two)));
+		assert!(!score_passes_strategy(s(100), s(100), SubmissionStrategy::ClaimBetterThan(two)));
+		assert!(!score_passes_strategy(s(101), s(100), SubmissionStrategy::ClaimBetterThan(two)));
+		assert!(!score_passes_strategy(s(102), s(100), SubmissionStrategy::ClaimBetterThan(two)));
+		assert!(score_passes_strategy(s(103), s(100), SubmissionStrategy::ClaimBetterThan(two)));
+		assert!(score_passes_strategy(s(150), s(100), SubmissionStrategy::ClaimBetterThan(two)));
+
+		// if no less than 2% worse
+		assert!(!score_passes_strategy(s(50), s(100), SubmissionStrategy::ClaimNoWorseThan(two)));
+		assert!(!score_passes_strategy(s(97), s(100), SubmissionStrategy::ClaimNoWorseThan(two)));
+		assert!(score_passes_strategy(s(98), s(100), SubmissionStrategy::ClaimNoWorseThan(two)));
+		assert!(score_passes_strategy(s(99), s(100), SubmissionStrategy::ClaimNoWorseThan(two)));
+		assert!(score_passes_strategy(s(100), s(100), SubmissionStrategy::ClaimNoWorseThan(two)));
+		assert!(score_passes_strategy(s(101), s(100), SubmissionStrategy::ClaimNoWorseThan(two)));
+		assert!(score_passes_strategy(s(102), s(100), SubmissionStrategy::ClaimNoWorseThan(two)));
+		assert!(score_passes_strategy(s(103), s(100), SubmissionStrategy::ClaimNoWorseThan(two)));
+		assert!(score_passes_strategy(s(150), s(100), SubmissionStrategy::ClaimNoWorseThan(two)));
+	}
+}

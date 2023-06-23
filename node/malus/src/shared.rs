@@ -1,4 +1,4 @@
-// Copyright 2021 Parity Technologies (UK) Ltd.
+// Copyright (C) Parity Technologies (UK) Ltd.
 // This file is part of Polkadot.
 
 // Polkadot is free software: you can redistribute it and/or modify
@@ -15,7 +15,7 @@
 // along with Polkadot.  If not, see <http://www.gnu.org/licenses/>.
 
 use futures::prelude::*;
-use polkadot_node_primitives::SpawnNamed;
+use sp_core::traits::SpawnNamed;
 
 pub const MALUS: &str = "MALUS";
 

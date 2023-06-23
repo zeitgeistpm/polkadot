@@ -1,4 +1,4 @@
-// Copyright 2017-2020 Parity Technologies (UK) Ltd.
+// Copyright (C) Parity Technologies (UK) Ltd.
 // This file is part of Polkadot.
 
 // Polkadot is free software: you can redistribute it and/or modify
@@ -14,7 +14,9 @@
 // You should have received a copy of the GNU General Public License
 // along with Polkadot.  If not, see <http://www.gnu.org/licenses/>.
 
-use super::{AuthorityDiscoveryApi, Block, Error, Hash, IsCollator, Registry, SpawnNamed};
+use super::{AuthorityDiscoveryApi, Block, Error, Hash, IsCollator, Registry};
+use sp_core::traits::SpawnNamed;
+
 use lru::LruCache;
 use polkadot_availability_distribution::IncomingRequestReceivers;
 use polkadot_node_core_approval_voting::Config as ApprovalVotingConfig;
@@ -22,22 +24,25 @@ use polkadot_node_core_av_store::Config as AvailabilityConfig;
 use polkadot_node_core_candidate_validation::Config as CandidateValidationConfig;
 use polkadot_node_core_chain_selection::Config as ChainSelectionConfig;
 use polkadot_node_core_dispute_coordinator::Config as DisputeCoordinatorConfig;
-use polkadot_node_core_provisioner::ProvisionerConfig;
-use polkadot_node_network_protocol::request_response::{v1 as request_v1, IncomingRequestReceiver};
+use polkadot_node_network_protocol::{
+	peer_set::PeerSetProtocolNames,
+	request_response::{v1 as request_v1, IncomingRequestReceiver, ReqProtocolNames},
+};
 #[cfg(any(feature = "malus", test))]
 pub use polkadot_overseer::{
 	dummy::{dummy_overseer_builder, DummySubsystem},
 	HeadSupportsParachains,
 };
 use polkadot_overseer::{
-	metrics::Metrics as OverseerMetrics, BlockInfo, InitializedOverseerBuilder, MetricsTrait,
-	Overseer, OverseerConnector, OverseerHandle,
+	metrics::Metrics as OverseerMetrics, InitializedOverseerBuilder, MetricsTrait, Overseer,
+	OverseerConnector, OverseerHandle, SpawnGlue,
 };
 
 use polkadot_primitives::runtime_api::ParachainHost;
 use sc_authority_discovery::Service as AuthorityDiscoveryService;
 use sc_client_api::AuxStore;
 use sc_keystore::LocalKeystore;
+use sc_network::NetworkStateInfo;
 use sp_api::ProvideRuntimeApi;
 use sp_blockchain::HeaderBackend;
 use sp_consensus_babe::BabeApi;
@@ -50,7 +55,10 @@ pub use polkadot_availability_recovery::AvailabilityRecoverySubsystem;
 pub use polkadot_collator_protocol::{CollatorProtocolSubsystem, ProtocolSide};
 pub use polkadot_dispute_distribution::DisputeDistributionSubsystem;
 pub use polkadot_gossip_support::GossipSupport as GossipSupportSubsystem;
-pub use polkadot_network_bridge::NetworkBridge as NetworkBridgeSubsystem;
+pub use polkadot_network_bridge::{
+	Metrics as NetworkBridgeMetrics, NetworkBridgeRx as NetworkBridgeRxSubsystem,
+	NetworkBridgeTx as NetworkBridgeTxSubsystem,
+};
 pub use polkadot_node_collation_generation::CollationGenerationSubsystem;
 pub use polkadot_node_core_approval_voting::ApprovalVotingSubsystem;
 pub use polkadot_node_core_av_store::AvailabilityStoreSubsystem;
@@ -73,8 +81,6 @@ where
 	RuntimeClient::Api: ParachainHost<Block> + BabeApi<Block> + AuthorityDiscoveryApi<Block>,
 	Spawner: 'static + SpawnNamed + Clone + Unpin,
 {
-	/// Set of initial relay chain leaves to track.
-	pub leaves: Vec<BlockInfo>,
 	/// The keystore to use for i.e. validator keys.
 	pub keystore: Arc<LocalKeystore>,
 	/// Runtime client generic, providing the `ProvieRuntimeApi` trait besides others.
@@ -83,6 +89,8 @@ where
 	pub parachains_db: Arc<dyn polkadot_node_subsystem_util::database::Database>,
 	/// Underlying network service implementation.
 	pub network_service: Arc<sc_network::NetworkService<Block, Hash>>,
+	/// Underlying syncing service implementation.
+	pub sync_service: Arc<sc_network_sync::SyncingService<Block>>,
 	/// Underlying authority discovery service.
 	pub authority_discovery_service: AuthorityDiscoveryService,
 	/// POV request receiver
@@ -111,17 +119,23 @@ where
 	pub dispute_coordinator_config: DisputeCoordinatorConfig,
 	/// Enable PVF pre-checking
 	pub pvf_checker_enabled: bool,
+	/// Overseer channel capacity override.
+	pub overseer_message_channel_capacity_override: Option<usize>,
+	/// Request-response protocol names source.
+	pub req_protocol_names: ReqProtocolNames,
+	/// [`PeerSet`] protocol names to protocols mapping.
+	pub peerset_protocol_names: PeerSetProtocolNames,
 }
 
 /// Obtain a prepared `OverseerBuilder`, that is initialized
 /// with all default values.
-pub fn prepared_overseer_builder<'a, Spawner, RuntimeClient>(
+pub fn prepared_overseer_builder<Spawner, RuntimeClient>(
 	OverseerGenArgs {
-		leaves,
 		keystore,
 		runtime_client,
 		parachains_db,
 		network_service,
+		sync_service,
 		authority_discovery_service,
 		pov_req_receiver,
 		chunk_req_receiver,
@@ -138,23 +152,30 @@ pub fn prepared_overseer_builder<'a, Spawner, RuntimeClient>(
 		chain_selection_config,
 		dispute_coordinator_config,
 		pvf_checker_enabled,
-	}: OverseerGenArgs<'a, Spawner, RuntimeClient>,
+		overseer_message_channel_capacity_override,
+		req_protocol_names,
+		peerset_protocol_names,
+	}: OverseerGenArgs<Spawner, RuntimeClient>,
 ) -> Result<
 	InitializedOverseerBuilder<
-		Spawner,
+		SpawnGlue<Spawner>,
 		Arc<RuntimeClient>,
 		CandidateValidationSubsystem,
 		PvfCheckerSubsystem,
-		CandidateBackingSubsystem<Spawner>,
+		CandidateBackingSubsystem,
 		StatementDistributionSubsystem<rand::rngs::StdRng>,
 		AvailabilityDistributionSubsystem,
 		AvailabilityRecoverySubsystem,
-		BitfieldSigningSubsystem<Spawner>,
+		BitfieldSigningSubsystem,
 		BitfieldDistributionSubsystem,
-		ProvisionerSubsystem<Spawner>,
+		ProvisionerSubsystem,
 		RuntimeApiSubsystem<RuntimeClient>,
 		AvailabilityStoreSubsystem,
-		NetworkBridgeSubsystem<
+		NetworkBridgeRxSubsystem<
+			Arc<sc_network::NetworkService<Block, Hash>>,
+			AuthorityDiscoveryService,
+		>,
+		NetworkBridgeTxSubsystem<
 			Arc<sc_network::NetworkService<Block, Hash>>,
 			AuthorityDiscoveryService,
 		>,
@@ -179,29 +200,46 @@ where
 
 	let metrics = <OverseerMetrics as MetricsTrait>::register(registry)?;
 
+	let spawner = SpawnGlue(spawner);
+
+	let network_bridge_metrics: NetworkBridgeMetrics = Metrics::register(registry)?;
+
 	let builder = Overseer::builder()
+		.network_bridge_tx(NetworkBridgeTxSubsystem::new(
+			network_service.clone(),
+			authority_discovery_service.clone(),
+			network_bridge_metrics.clone(),
+			req_protocol_names,
+			peerset_protocol_names.clone(),
+		))
+		.network_bridge_rx(NetworkBridgeRxSubsystem::new(
+			network_service.clone(),
+			authority_discovery_service.clone(),
+			Box::new(sync_service.clone()),
+			network_bridge_metrics,
+			peerset_protocol_names,
+		))
 		.availability_distribution(AvailabilityDistributionSubsystem::new(
 			keystore.clone(),
 			IncomingRequestReceivers { pov_req_receiver, chunk_req_receiver },
 			Metrics::register(registry)?,
 		))
-		.availability_recovery(AvailabilityRecoverySubsystem::with_chunks_only(
+		.availability_recovery(AvailabilityRecoverySubsystem::with_chunks_if_pov_large(
 			available_data_req_receiver,
 			Metrics::register(registry)?,
 		))
 		.availability_store(AvailabilityStoreSubsystem::new(
 			parachains_db.clone(),
 			availability_config,
+			Box::new(sync_service.clone()),
 			Metrics::register(registry)?,
 		))
 		.bitfield_distribution(BitfieldDistributionSubsystem::new(Metrics::register(registry)?))
 		.bitfield_signing(BitfieldSigningSubsystem::new(
-			spawner.clone(),
 			keystore.clone(),
 			Metrics::register(registry)?,
 		))
 		.candidate_backing(CandidateBackingSubsystem::new(
-			spawner.clone(),
 			keystore.clone(),
 			Metrics::register(registry)?,
 		))
@@ -220,7 +258,7 @@ where
 		.collator_protocol({
 			let side = match is_collator {
 				IsCollator::Yes(collator_pair) => ProtocolSide::Collator(
-					network_service.local_peer_id().clone(),
+					network_service.local_peer_id(),
 					collator_pair,
 					collation_req_receiver,
 					Metrics::register(registry)?,
@@ -233,17 +271,7 @@ where
 			};
 			CollatorProtocolSubsystem::new(side)
 		})
-		.network_bridge(NetworkBridgeSubsystem::new(
-			network_service.clone(),
-			authority_discovery_service.clone(),
-			Box::new(network_service.clone()),
-			Metrics::register(registry)?,
-		))
-		.provisioner(ProvisionerSubsystem::new(
-			spawner.clone(),
-			ProvisionerConfig,
-			Metrics::register(registry)?,
-		))
+		.provisioner(ProvisionerSubsystem::new(Metrics::register(registry)?))
 		.runtime_api(RuntimeApiSubsystem::new(
 			runtime_client.clone(),
 			Metrics::register(registry)?,
@@ -260,7 +288,7 @@ where
 			approval_voting_config,
 			parachains_db.clone(),
 			keystore.clone(),
-			Box::new(network_service.clone()),
+			Box::new(sync_service.clone()),
 			Metrics::register(registry)?,
 		))
 		.gossip_support(GossipSupportSubsystem::new(
@@ -281,11 +309,6 @@ where
 			Metrics::register(registry)?,
 		))
 		.chain_selection(ChainSelectionSubsystem::new(chain_selection_config, parachains_db))
-		.leaves(Vec::from_iter(
-			leaves
-				.into_iter()
-				.map(|BlockInfo { hash, parent_hash: _, number }| (hash, number)),
-		))
 		.activation_external_listeners(Default::default())
 		.span_per_active_leaf(Default::default())
 		.active_leaves(Default::default())
@@ -293,7 +316,12 @@ where
 		.known_leaves(LruCache::new(KNOWN_LEAVES_CACHE_SIZE))
 		.metrics(metrics)
 		.spawner(spawner);
-	Ok(builder)
+
+	if let Some(capacity) = overseer_message_channel_capacity_override {
+		Ok(builder.message_channel_capacity(capacity))
+	} else {
+		Ok(builder)
+	}
 }
 
 /// Trait for the `fn` generating the overseer.
@@ -302,11 +330,11 @@ where
 /// would do.
 pub trait OverseerGen {
 	/// Overwrite the full generation of the overseer, including the subsystems.
-	fn generate<'a, Spawner, RuntimeClient>(
+	fn generate<Spawner, RuntimeClient>(
 		&self,
 		connector: OverseerConnector,
-		args: OverseerGenArgs<'a, Spawner, RuntimeClient>,
-	) -> Result<(Overseer<Spawner, Arc<RuntimeClient>>, OverseerHandle), Error>
+		args: OverseerGenArgs<Spawner, RuntimeClient>,
+	) -> Result<(Overseer<SpawnGlue<Spawner>, Arc<RuntimeClient>>, OverseerHandle), Error>
 	where
 		RuntimeClient: 'static + ProvideRuntimeApi<Block> + HeaderBackend<Block> + AuxStore,
 		RuntimeClient::Api: ParachainHost<Block> + BabeApi<Block> + AuthorityDiscoveryApi<Block>,
@@ -326,11 +354,11 @@ use polkadot_overseer::KNOWN_LEAVES_CACHE_SIZE;
 pub struct RealOverseerGen;
 
 impl OverseerGen for RealOverseerGen {
-	fn generate<'a, Spawner, RuntimeClient>(
+	fn generate<Spawner, RuntimeClient>(
 		&self,
 		connector: OverseerConnector,
-		args: OverseerGenArgs<'a, Spawner, RuntimeClient>,
-	) -> Result<(Overseer<Spawner, Arc<RuntimeClient>>, OverseerHandle), Error>
+		args: OverseerGenArgs<Spawner, RuntimeClient>,
+	) -> Result<(Overseer<SpawnGlue<Spawner>, Arc<RuntimeClient>>, OverseerHandle), Error>
 	where
 		RuntimeClient: 'static + ProvideRuntimeApi<Block> + HeaderBackend<Block> + AuxStore,
 		RuntimeClient::Api: ParachainHost<Block> + BabeApi<Block> + AuthorityDiscoveryApi<Block>,

@@ -1,4 +1,4 @@
-// Copyright 2021 Parity Technologies (UK) Ltd.
+// Copyright (C) Parity Technologies (UK) Ltd.
 // This file is part of Polkadot.
 
 // Polkadot is free software: you can redistribute it and/or modify
@@ -18,11 +18,11 @@ use std::collections::HashSet;
 
 use futures::{executor, future, Future};
 
-use polkadot_node_network_protocol::request_response::IncomingRequest;
-use polkadot_primitives::v2::CoreState;
-use sp_keystore::SyncCryptoStorePtr;
+use polkadot_node_network_protocol::request_response::{IncomingRequest, ReqProtocolNames};
+use polkadot_primitives::{CoreState, Hash};
+use sp_keystore::KeystorePtr;
 
-use polkadot_subsystem_testhelpers as test_helpers;
+use polkadot_node_subsystem_test_helpers as test_helpers;
 
 use super::*;
 
@@ -34,16 +34,19 @@ use state::{TestHarness, TestState};
 pub(crate) mod mock;
 
 fn test_harness<T: Future<Output = ()>>(
-	keystore: SyncCryptoStorePtr,
+	keystore: KeystorePtr,
 	test_fx: impl FnOnce(TestHarness) -> T,
 ) {
 	sp_tracing::try_init_simple();
 
 	let pool = sp_core::testing::TaskExecutor::new();
 	let (context, virtual_overseer) = test_helpers::make_subsystem_context(pool.clone());
+	let genesis_hash = Hash::repeat_byte(0xff);
+	let req_protocol_names = ReqProtocolNames::new(&genesis_hash, None);
 
-	let (pov_req_receiver, pov_req_cfg) = IncomingRequest::get_config_receiver();
-	let (chunk_req_receiver, chunk_req_cfg) = IncomingRequest::get_config_receiver();
+	let (pov_req_receiver, pov_req_cfg) = IncomingRequest::get_config_receiver(&req_protocol_names);
+	let (chunk_req_receiver, chunk_req_cfg) =
+		IncomingRequest::get_config_receiver(&req_protocol_names);
 	let subsystem = AvailabilityDistributionSubsystem::new(
 		keystore,
 		IncomingRequestReceivers { pov_req_receiver, chunk_req_receiver },

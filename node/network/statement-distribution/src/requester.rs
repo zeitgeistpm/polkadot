@@ -1,4 +1,4 @@
-// Copyright 2021 Parity Technologies (UK) Ltd.
+// Copyright (C) Parity Technologies (UK) Ltd.
 // Polkadot is free software: you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
 // the Free Software Foundation, either version 3 of the License, or
@@ -28,9 +28,9 @@ use polkadot_node_network_protocol::{
 	},
 	PeerId, UnifiedReputationChange,
 };
+use polkadot_node_subsystem::{Span, Stage};
 use polkadot_node_subsystem_util::TimeoutExt;
-use polkadot_primitives::v2::{CandidateHash, CommittedCandidateReceipt, Hash};
-use polkadot_subsystem::{Span, Stage};
+use polkadot_primitives::{CandidateHash, CommittedCandidateReceipt, Hash};
 
 use crate::{metrics::Metrics, COST_WRONG_HASH, LOG_TARGET};
 
@@ -107,7 +107,7 @@ pub async fn fetch(
 			let (outgoing, pending_response) =
 				OutgoingRequest::new(Recipient::Peer(peer), req.clone());
 			if let Err(err) = sender
-				.feed(RequesterMessage::SendRequest(Requests::StatementFetching(outgoing)))
+				.feed(RequesterMessage::SendRequest(Requests::StatementFetchingV1(outgoing)))
 				.await
 			{
 				gum::info!(

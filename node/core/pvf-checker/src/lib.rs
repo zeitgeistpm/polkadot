@@ -1,4 +1,4 @@
-// Copyright 2021 Parity Technologies (UK) Ltd.
+// Copyright (C) Parity Technologies (UK) Ltd.
 // This file is part of Polkadot.
 
 // Polkadot is free software: you can redistribute it and/or modify
@@ -22,15 +22,15 @@
 use futures::{channel::oneshot, future::BoxFuture, prelude::*, stream::FuturesUnordered};
 
 use polkadot_node_subsystem::{
-	messages::{CandidateValidationMessage, PreCheckOutcome, PvfCheckerMessage},
-	overseer, ActiveLeavesUpdate, FromOverseer, OverseerSignal, SpawnedSubsystem, SubsystemContext,
-	SubsystemError, SubsystemResult, SubsystemSender,
+	messages::{CandidateValidationMessage, PreCheckOutcome, PvfCheckerMessage, RuntimeApiMessage},
+	overseer, ActiveLeavesUpdate, FromOrchestra, OverseerSignal, SpawnedSubsystem, SubsystemError,
+	SubsystemResult, SubsystemSender,
 };
-use polkadot_primitives::v2::{
+use polkadot_primitives::{
 	BlockNumber, Hash, PvfCheckStatement, SessionIndex, ValidationCodeHash, ValidatorId,
 	ValidatorIndex,
 };
-use sp_keystore::SyncCryptoStorePtr;
+use sp_keystore::KeystorePtr;
 use std::collections::HashSet;
 
 const LOG_TARGET: &str = "parachain::pvf-checker";
@@ -50,21 +50,18 @@ use self::{
 /// PVF pre-checking subsystem.
 pub struct PvfCheckerSubsystem {
 	enabled: bool,
-	keystore: SyncCryptoStorePtr,
+	keystore: KeystorePtr,
 	metrics: Metrics,
 }
 
 impl PvfCheckerSubsystem {
-	pub fn new(enabled: bool, keystore: SyncCryptoStorePtr, metrics: Metrics) -> Self {
+	pub fn new(enabled: bool, keystore: KeystorePtr, metrics: Metrics) -> Self {
 		PvfCheckerSubsystem { enabled, keystore, metrics }
 	}
 }
 
-impl<Context> overseer::Subsystem<Context, SubsystemError> for PvfCheckerSubsystem
-where
-	Context: SubsystemContext<Message = PvfCheckerMessage>,
-	Context: overseer::SubsystemContext<Message = PvfCheckerMessage>,
-{
+#[overseer::subsystem(PvfChecker, error=SubsystemError, prefix = self::overseer)]
+impl<Context> PvfCheckerSubsystem {
 	fn start(self, ctx: Context) -> SpawnedSubsystem {
 		if self.enabled {
 			let future = run(ctx, self.keystore, self.metrics)
@@ -123,15 +120,12 @@ struct State {
 		FuturesUnordered<BoxFuture<'static, Option<(PreCheckOutcome, ValidationCodeHash)>>>,
 }
 
+#[overseer::contextbounds(PvfChecker, prefix = self::overseer)]
 async fn run<Context>(
 	mut ctx: Context,
-	keystore: SyncCryptoStorePtr,
+	keystore: KeystorePtr,
 	metrics: Metrics,
-) -> SubsystemResult<()>
-where
-	Context: SubsystemContext<Message = PvfCheckerMessage>,
-	Context: overseer::SubsystemContext<Message = PvfCheckerMessage>,
-{
+) -> SubsystemResult<()> {
 	let mut state = State {
 		credentials: None,
 		recent_block: None,
@@ -179,8 +173,8 @@ where
 /// Handle an incoming PVF pre-check result from the candidate-validation subsystem.
 async fn handle_pvf_check(
 	state: &mut State,
-	sender: &mut impl SubsystemSender,
-	keystore: &SyncCryptoStorePtr,
+	sender: &mut impl overseer::PvfCheckerSenderTrait,
+	keystore: &KeystorePtr,
 	metrics: &Metrics,
 	outcome: PreCheckOutcome,
 	validation_code_hash: ValidationCodeHash,
@@ -196,16 +190,18 @@ async fn handle_pvf_check(
 		PreCheckOutcome::Valid => Judgement::Valid,
 		PreCheckOutcome::Invalid => Judgement::Invalid,
 		PreCheckOutcome::Failed => {
-			// Abstain.
+			// Always vote against in case of failures. Voting against a PVF when encountering a
+			// timeout (or an unlikely node-specific issue) can be considered safe, since
+			// there is no slashing for being on the wrong side on a pre-check vote.
 			//
-			// Returning here will leave the PVF in the view dangling. Since it is there, no new
-			// pre-checking request will be sent.
+			// Also, by being more strict here, we can safely be more lenient during preparation and
+			// avoid the risk of getting slashed there.
 			gum::info!(
 				target: LOG_TARGET,
 				?validation_code_hash,
-				"Pre-check failed, abstaining from voting",
+				"Pre-check failed, voting against",
 			);
-			return
+			Judgement::Invalid
 		},
 	};
 
@@ -247,25 +243,25 @@ struct Conclude;
 
 async fn handle_from_overseer(
 	state: &mut State,
-	sender: &mut impl SubsystemSender,
-	keystore: &SyncCryptoStorePtr,
+	sender: &mut impl overseer::PvfCheckerSenderTrait,
+	keystore: &KeystorePtr,
 	metrics: &Metrics,
-	from_overseer: FromOverseer<PvfCheckerMessage>,
+	from_overseer: FromOrchestra<PvfCheckerMessage>,
 ) -> Option<Conclude> {
 	match from_overseer {
-		FromOverseer::Signal(OverseerSignal::Conclude) => {
+		FromOrchestra::Signal(OverseerSignal::Conclude) => {
 			gum::info!(target: LOG_TARGET, "Received `Conclude` signal, exiting");
 			Some(Conclude)
 		},
-		FromOverseer::Signal(OverseerSignal::BlockFinalized(_, _)) => {
+		FromOrchestra::Signal(OverseerSignal::BlockFinalized(_, _)) => {
 			// ignore
 			None
 		},
-		FromOverseer::Signal(OverseerSignal::ActiveLeaves(update)) => {
+		FromOrchestra::Signal(OverseerSignal::ActiveLeaves(update)) => {
 			handle_leaves_update(state, sender, keystore, metrics, update).await;
 			None
 		},
-		FromOverseer::Communication { msg } => match msg {
+		FromOrchestra::Communication { msg } => match msg {
 				// uninhabited type, thus statically unreachable.
 			},
 	}
@@ -273,8 +269,8 @@ async fn handle_from_overseer(
 
 async fn handle_leaves_update(
 	state: &mut State,
-	sender: &mut impl SubsystemSender,
-	keystore: &SyncCryptoStorePtr,
+	sender: &mut impl overseer::PvfCheckerSenderTrait,
+	keystore: &KeystorePtr,
 	metrics: &Metrics,
 	update: ActiveLeavesUpdate,
 ) {
@@ -301,7 +297,7 @@ async fn handle_leaves_update(
 		metrics.on_pvf_observed(outcome.newcomers.len());
 		metrics.on_pvf_left(outcome.left_num);
 		for newcomer in outcome.newcomers {
-			initiate_precheck(state, sender, recent_block_hash, newcomer, metrics).await;
+			initiate_precheck(state, sender, activated.hash, newcomer, metrics).await;
 		}
 
 		if let Some((new_session_index, credentials)) = new_session_index {
@@ -355,8 +351,8 @@ struct ActivationEffect {
 /// Returns `None` if the PVF pre-checking runtime API is not supported for the given leaf hash.
 async fn examine_activation(
 	state: &mut State,
-	sender: &mut impl SubsystemSender,
-	keystore: &SyncCryptoStorePtr,
+	sender: &mut impl overseer::PvfCheckerSenderTrait,
+	keystore: &KeystorePtr,
 	leaf_hash: Hash,
 	leaf_number: BlockNumber,
 ) -> Option<ActivationEffect> {
@@ -414,8 +410,8 @@ async fn examine_activation(
 /// Checks the active validators for the given leaf. If we have a signing key for one of them,
 /// returns the [`SigningCredentials`].
 async fn check_signing_credentials(
-	sender: &mut impl SubsystemSender,
-	keystore: &SyncCryptoStorePtr,
+	sender: &mut impl SubsystemSender<RuntimeApiMessage>,
+	keystore: &KeystorePtr,
 	leaf: Hash,
 ) -> Option<SigningCredentials> {
 	let validators = match runtime_api::validators(sender, leaf).await {
@@ -431,20 +427,17 @@ async fn check_signing_credentials(
 		},
 	};
 
-	polkadot_node_subsystem_util::signing_key_and_index(&validators, keystore)
-		.await
-		.map(|(validator_key, validator_index)| SigningCredentials {
-			validator_key,
-			validator_index,
-		})
+	polkadot_node_subsystem_util::signing_key_and_index(&validators, keystore).map(
+		|(validator_key, validator_index)| SigningCredentials { validator_key, validator_index },
+	)
 }
 
 /// Signs and submits a vote for or against a given validation code.
 ///
 /// If the validator already voted for the given code, this function does nothing.
 async fn sign_and_submit_pvf_check_statement(
-	sender: &mut impl SubsystemSender,
-	keystore: &SyncCryptoStorePtr,
+	sender: &mut impl overseer::PvfCheckerSenderTrait,
+	keystore: &KeystorePtr,
 	voted: &mut HashSet<ValidationCodeHash>,
 	credentials: &SigningCredentials,
 	metrics: &Metrics,
@@ -486,9 +479,7 @@ async fn sign_and_submit_pvf_check_statement(
 		keystore,
 		&credentials.validator_key,
 		&stmt.signing_payload(),
-	)
-	.await
-	{
+	) {
 		Ok(Some(signature)) => signature,
 		Ok(None) => {
 			gum::warn!(
@@ -535,7 +526,7 @@ async fn sign_and_submit_pvf_check_statement(
 /// into the `currently_checking` set.
 async fn initiate_precheck(
 	state: &mut State,
-	sender: &mut impl SubsystemSender,
+	sender: &mut impl overseer::PvfCheckerSenderTrait,
 	relay_parent: Hash,
 	validation_code_hash: ValidationCodeHash,
 	metrics: &Metrics,
@@ -544,9 +535,7 @@ async fn initiate_precheck(
 
 	let (tx, rx) = oneshot::channel();
 	sender
-		.send_message(
-			CandidateValidationMessage::PreCheck(relay_parent, validation_code_hash, tx).into(),
-		)
+		.send_message(CandidateValidationMessage::PreCheck(relay_parent, validation_code_hash, tx))
 		.await;
 
 	let timer = metrics.time_pre_check_judgement();

@@ -1,4 +1,4 @@
-// Copyright 2021 Parity Technologies (UK) Ltd.
+// Copyright (C) Parity Technologies (UK) Ltd.
 // This file is part of Polkadot.
 
 // Polkadot is free software: you can redistribute it and/or modify
@@ -16,18 +16,20 @@
 
 use crate::{
 	configuration, inclusion, initializer, paras,
+	paras::ParaKind,
 	paras_inherent::{self},
 	scheduler, session_info, shared,
 };
 use bitvec::{order::Lsb0 as BitOrderLsb0, vec::BitVec};
 use frame_support::pallet_prelude::*;
-use primitives::v2::{
+use primitives::{
 	collator_signature_payload, AvailabilityBitfield, BackedCandidate, CandidateCommitments,
 	CandidateDescriptor, CandidateHash, CollatorId, CollatorSignature, CommittedCandidateReceipt,
 	CompactStatement, CoreIndex, CoreOccupied, DisputeStatement, DisputeStatementSet, GroupIndex,
-	HeadData, Id as ParaId, InherentData as ParachainsInherentData, InvalidDisputeStatementKind,
-	PersistedValidationData, SessionIndex, SigningContext, UncheckedSigned,
-	ValidDisputeStatementKind, ValidationCode, ValidatorId, ValidatorIndex, ValidityAttestation,
+	HeadData, Id as ParaId, IndexedVec, InherentData as ParachainsInherentData,
+	InvalidDisputeStatementKind, PersistedValidationData, SessionIndex, SigningContext,
+	UncheckedSigned, ValidDisputeStatementKind, ValidationCode, ValidatorId, ValidatorIndex,
+	ValidityAttestation,
 };
 use sp_core::{sr25519, H256};
 use sp_runtime::{
@@ -65,7 +67,7 @@ fn byte32_slice_from(n: u32) -> [u8; 32] {
 /// Paras inherent `enter` benchmark scenario builder.
 pub(crate) struct BenchBuilder<T: paras_inherent::Config> {
 	/// Active validators. Validators should be declared prior to all other setup.
-	validators: Option<Vec<ValidatorId>>,
+	validators: Option<IndexedVec<ValidatorIndex, ValidatorId>>,
 	/// Starting block number; we expect it to get incremented on session setup.
 	block_number: T::BlockNumber,
 	/// Starting session; we expect it to get incremented on session setup.
@@ -290,8 +292,8 @@ impl<T: paras_inherent::Config> BenchBuilder<T> {
 			availability_votes,
 		);
 		let commitments = CandidateCommitments::<u32> {
-			upward_messages: vec![],
-			horizontal_messages: vec![],
+			upward_messages: Default::default(),
+			horizontal_messages: Default::default(),
 			new_validation_code: None,
 			head_data: Self::mock_head_data(),
 			processed_downward_messages: 0,
@@ -338,14 +340,20 @@ impl<T: paras_inherent::Config> BenchBuilder<T> {
 		// make sure parachains exist prior to session change.
 		for i in 0..cores {
 			let para_id = ParaId::from(i as u32);
+			let validation_code = mock_validation_code();
 
 			paras::Pallet::<T>::schedule_para_initialize(
 				para_id,
 				paras::ParaGenesisArgs {
 					genesis_head: Self::mock_head_data(),
-					validation_code: mock_validation_code(),
-					parachain: true,
+					validation_code: validation_code.clone(),
+					para_kind: ParaKind::Parachain,
 				},
+			)
+			.unwrap();
+			paras::Pallet::<T>::add_trusted_validation_code(
+				frame_system::Origin::<T>::Root.into(),
+				validation_code,
 			)
 			.unwrap();
 		}
@@ -410,7 +418,7 @@ impl<T: paras_inherent::Config> BenchBuilder<T> {
 		assert_eq!(<shared::Pallet<T>>::session_index(), target_session);
 
 		// We need to refetch validators since they have been shuffled.
-		let validators_shuffled: Vec<_> = session_info::Pallet::<T>::session_info(target_session)
+		let validators_shuffled = session_info::Pallet::<T>::session_info(target_session)
 			.unwrap()
 			.validators
 			.clone();
@@ -533,8 +541,8 @@ impl<T: paras_inherent::Config> BenchBuilder<T> {
 						validation_code_hash,
 					},
 					commitments: CandidateCommitments::<u32> {
-						upward_messages: Vec::new(),
-						horizontal_messages: Vec::new(),
+						upward_messages: Default::default(),
+						horizontal_messages: Default::default(),
 						new_validation_code: includes_code_upgrade
 							.map(|v| ValidationCode(vec![42u8; v as usize])),
 						head_data,
@@ -549,7 +557,7 @@ impl<T: paras_inherent::Config> BenchBuilder<T> {
 					.iter()
 					.take(*num_votes as usize)
 					.map(|val_idx| {
-						let public = validators.get(val_idx.0 as usize).unwrap();
+						let public = validators.get(*val_idx).unwrap();
 						let sig = UncheckedSigned::<CompactStatement>::benchmark_sign(
 							public,
 							CompactStatement::Valid(candidate_hash.clone()),
@@ -573,7 +581,7 @@ impl<T: paras_inherent::Config> BenchBuilder<T> {
 
 	/// Fill cores `start..last` with dispute statement sets. The statement sets will have 3/4th of
 	/// votes be valid, and 1/4th of votes be invalid.
-	fn create_disputes_with_no_spam(
+	fn create_disputes(
 		&self,
 		start: u32,
 		last: u32,
@@ -593,6 +601,7 @@ impl<T: paras_inherent::Config> BenchBuilder<T> {
 
 				let (para_id, core_idx, group_idx) = self.create_indexes(seed);
 				let candidate_hash = CandidateHash(H256::from(byte32_slice_from(seed)));
+				let relay_parent = H256::from(byte32_slice_from(seed));
 
 				Self::add_availability(
 					para_id,
@@ -606,15 +615,18 @@ impl<T: paras_inherent::Config> BenchBuilder<T> {
 					self.dispute_statements.get(&seed).cloned().unwrap_or(validators.len() as u32);
 				let statements = (0..statements_len)
 					.map(|validator_index| {
-						let validator_public = &validators.get(validator_index as usize).expect("Test case is not borked. `ValidatorIndex` out of bounds of `ValidatorId`s.");
+						let validator_public = &validators.get(ValidatorIndex::from(validator_index)).expect("Test case is not borked. `ValidatorIndex` out of bounds of `ValidatorId`s.");
 
 						// We need dispute statements on each side. And we don't want a revert log
 						// so we make sure that we have a super majority with valid statements.
 						let dispute_statement = if validator_index % 4 == 0 {
 							DisputeStatement::Invalid(InvalidDisputeStatementKind::Explicit)
+						} else if validator_index < 3 {
+							// Set two votes as backing for the dispute set to be accepted
+							DisputeStatement::Valid(
+								ValidDisputeStatementKind::BackingValid(relay_parent)
+							)
 						} else {
-							// Note that in the future we could use some availability votes as an
-							// implicit valid kind.
 							DisputeStatement::Valid(ValidDisputeStatementKind::Explicit)
 						};
 						let data = dispute_statement.payload_data(candidate_hash.clone(), session);
@@ -638,7 +650,9 @@ impl<T: paras_inherent::Config> BenchBuilder<T> {
 	pub(crate) fn build(self) -> Bench<T> {
 		// Make sure relevant storage is cleared. This is just to get the asserts to work when
 		// running tests because it seems the storage is not cleared in between.
+		#[allow(deprecated)]
 		inclusion::PendingAvailabilityCommitments::<T>::remove_all(None);
+		#[allow(deprecated)]
 		inclusion::PendingAvailability::<T>::remove_all(None);
 
 		// We don't allow a core to have both disputes and be marked fully available at this block.
@@ -660,7 +674,7 @@ impl<T: paras_inherent::Config> BenchBuilder<T> {
 		let backed_candidates = builder
 			.create_backed_candidates(&builder.backed_and_concluding_cores, builder.code_upgrade);
 
-		let disputes = builder.create_disputes_with_no_spam(
+		let disputes = builder.create_disputes(
 			builder.backed_and_concluding_cores.len() as u32,
 			used_cores,
 			builder.dispute_sessions.as_slice(),

@@ -1,4 +1,4 @@
-// Copyright 2020 Parity Technologies (UK) Ltd.
+// Copyright (C) Parity Technologies (UK) Ltd.
 // This file is part of Polkadot.
 
 // Polkadot is free software: you can redistribute it and/or modify
@@ -17,14 +17,17 @@
 //! The session info pallet provides information about validator sets
 //! from prior sessions needed for approvals and disputes.
 //!
-//! See https://w3f.github.io/parachain-implementers-guide/runtime/session_info.html.
+//! See <https://w3f.github.io/parachain-implementers-guide/runtime/session_info.html>.
 
 use crate::{
 	configuration, paras, scheduler, shared,
 	util::{take_active_subset, take_active_subset_and_inactive},
 };
-use frame_support::{pallet_prelude::*, traits::OneSessionHandler};
-use primitives::v2::{AssignmentId, AuthorityDiscoveryId, SessionIndex, SessionInfo};
+use frame_support::{
+	pallet_prelude::*,
+	traits::{OneSessionHandler, ValidatorSet, ValidatorSetWithIdentification},
+};
+use primitives::{AssignmentId, AuthorityDiscoveryId, ExecutorParams, SessionIndex, SessionInfo};
 use sp_std::vec::Vec;
 
 pub use pallet::*;
@@ -34,12 +37,25 @@ pub mod migration;
 #[cfg(test)]
 mod tests;
 
+/// A type for representing the validator account id in a session.
+pub type AccountId<T> = <<T as Config>::ValidatorSet as ValidatorSet<
+	<T as frame_system::Config>::AccountId,
+>>::ValidatorId;
+
+/// A tuple of `(AccountId, Identification)` where `Identification`
+/// is the full identification of `AccountId`.
+pub type IdentificationTuple<T> = (
+	AccountId<T>,
+	<<T as Config>::ValidatorSet as ValidatorSetWithIdentification<
+		<T as frame_system::Config>::AccountId,
+	>>::Identification,
+);
+
 #[frame_support::pallet]
 pub mod pallet {
 	use super::*;
 
 	#[pallet::pallet]
-	#[pallet::generate_store(pub(super) trait Store)]
 	#[pallet::storage_version(migration::STORAGE_VERSION)]
 	#[pallet::without_storage_info]
 	pub struct Pallet<T>(_);
@@ -53,6 +69,10 @@ pub mod pallet {
 		+ scheduler::Config
 		+ AuthorityDiscoveryConfig
 	{
+		/// A type for retrieving `AccountId`s of the validators in the current session.
+		/// These are stash keys of the validators.
+		/// It's used for rewards and slashing. `Identification` is only needed for slashing.
+		type ValidatorSet: ValidatorSetWithIdentification<Self::AccountId>;
 	}
 
 	/// Assignment keys for the current session.
@@ -73,6 +93,20 @@ pub mod pallet {
 	#[pallet::storage]
 	#[pallet::getter(fn session_info)]
 	pub(crate) type Sessions<T: Config> = StorageMap<_, Identity, SessionIndex, SessionInfo>;
+
+	/// The validator account keys of the validators actively participating in parachain consensus.
+	// We do not store this in `SessionInfo` to avoid leaking the `AccountId` type to the client,
+	// which would complicate the migration process if we are to change it in the future.
+	#[pallet::storage]
+	#[pallet::getter(fn account_keys)]
+	pub(crate) type AccountKeys<T: Config> =
+		StorageMap<_, Identity, SessionIndex, Vec<AccountId<T>>>;
+
+	/// Executor parameter set for a given session index
+	#[pallet::storage]
+	#[pallet::getter(fn session_executor_params)]
+	pub(crate) type SessionExecutorParams<T: Config> =
+		StorageMap<_, Identity, SessionIndex, ExecutorParams>;
 }
 
 /// An abstraction for the authority discovery pallet
@@ -97,12 +131,12 @@ impl<T: Config> Pallet<T> {
 
 		let dispute_period = config.dispute_period;
 
-		let validators = notification.validators.clone();
+		let validators = notification.validators.clone().into();
 		let discovery_keys = <T as AuthorityDiscoveryConfig>::authorities();
 		let assignment_keys = AssignmentKeysUnsafe::<T>::get();
 		let active_set = <shared::Pallet<T>>::active_validator_indices();
 
-		let validator_groups = <scheduler::Pallet<T>>::validator_groups();
+		let validator_groups = <scheduler::Pallet<T>>::validator_groups().into();
 		let n_cores = <scheduler::Pallet<T>>::availability_cores().len() as u32;
 		let zeroth_delay_tranche_width = config.zeroth_delay_tranche_width;
 		let relay_vrf_modulo_samples = config.relay_vrf_modulo_samples;
@@ -121,6 +155,10 @@ impl<T: Config> Pallet<T> {
 		if old_earliest_stored_session != 0 || Sessions::<T>::get(0).is_some() {
 			for idx in old_earliest_stored_session..new_earliest_stored_session {
 				Sessions::<T>::remove(&idx);
+				// Idx will be missing for a few sessions after the runtime upgrade.
+				// But it shouldn'be be a problem.
+				AccountKeys::<T>::remove(&idx);
+				SessionExecutorParams::<T>::remove(&idx);
 			}
 			// update `EarliestStoredSession` based on `config.dispute_period`
 			EarliestStoredSession::<T>::set(new_earliest_stored_session);
@@ -128,6 +166,13 @@ impl<T: Config> Pallet<T> {
 			// just introduced on a live chain
 			EarliestStoredSession::<T>::set(new_session_index);
 		}
+
+		// The validator set is guaranteed to be of the current session
+		// because we delay `on_new_session` till the end of the block.
+		let account_ids = T::ValidatorSet::validators();
+		let active_account_ids = take_active_subset(&active_set, &account_ids);
+		AccountKeys::<T>::insert(&new_session_index, &active_account_ids);
+
 		// create a new entry in `Sessions` with information about the current session
 		let new_session_info = SessionInfo {
 			validators, // these are from the notification and are thus already correct.
@@ -145,11 +190,13 @@ impl<T: Config> Pallet<T> {
 			dispute_period,
 		};
 		Sessions::<T>::insert(&new_session_index, &new_session_info);
+
+		SessionExecutorParams::<T>::insert(&new_session_index, config.executor_params);
 	}
 
 	/// Called by the initializer to initialize the session info pallet.
 	pub(crate) fn initializer_initialize(_now: T::BlockNumber) -> Weight {
-		0
+		Weight::zero()
 	}
 
 	/// Called by the initializer to finalize the session info pallet.

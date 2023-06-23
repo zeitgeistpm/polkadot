@@ -1,4 +1,4 @@
-// Copyright 2021 Parity Technologies (UK) Ltd.
+// Copyright (C) Parity Technologies (UK) Ltd.
 // This file is part of Polkadot.
 
 // Polkadot is free software: you can redistribute it and/or modify
@@ -24,7 +24,8 @@
 //! and as the finalized block advances, orphaned sub-trees are entirely pruned.
 
 use polkadot_node_primitives::BlockWeight;
-use polkadot_primitives::v2::{BlockNumber, Hash};
+use polkadot_node_subsystem::ChainApiError;
+use polkadot_primitives::{BlockNumber, Hash};
 
 use std::collections::HashMap;
 
@@ -86,7 +87,7 @@ impl ViabilityUpdate {
 
 // Propagate viability update to descendants of the given block. This writes
 // the `base` entry as well as all descendants. If the parent of the block
-// entry is not viable, this wlil not affect any descendants.
+// entry is not viable, this will not affect any descendants.
 //
 // If the block entry provided is self-unviable, then it's assumed that an
 // unviability update needs to be propagated to descendants.
@@ -246,7 +247,7 @@ pub(crate) fn import_block(
 	stagnant_at: Timestamp,
 ) -> Result<(), Error> {
 	add_block(backend, block_hash, block_number, parent_hash, weight, stagnant_at)?;
-	apply_reversions(backend, block_hash, block_number, reversion_logs)?;
+	apply_ancestor_reversions(backend, block_hash, block_number, reversion_logs)?;
 
 	Ok(())
 }
@@ -346,9 +347,9 @@ fn add_block(
 	Ok(())
 }
 
-// Assuming that a block is already imported, accepts the number of the block
-// as well as a list of reversions triggered by the block in ascending order.
-fn apply_reversions(
+/// Assuming that a block is already imported, accepts the number of the block
+/// as well as a list of reversions triggered by the block in ascending order.
+fn apply_ancestor_reversions(
 	backend: &mut OverlayedBackend<impl Backend>,
 	block_hash: Hash,
 	block_number: BlockNumber,
@@ -357,39 +358,90 @@ fn apply_reversions(
 	// Note: since revert numbers are  in ascending order, the expensive propagation
 	// of unviability is only heavy on the first log.
 	for revert_number in reversions {
-		let mut ancestor_entry =
-			match load_ancestor(backend, block_hash, block_number, revert_number)? {
-				None => {
-					gum::warn!(
-						target: LOG_TARGET,
-						?block_hash,
-						block_number,
-						revert_target = revert_number,
-						"The hammer has dropped. \
-					A block has indicated that its finalized ancestor be reverted. \
-					Please inform an adult.",
-					);
-
-					continue
-				},
-				Some(ancestor_entry) => {
-					gum::info!(
-						target: LOG_TARGET,
-						?block_hash,
-						block_number,
-						revert_target = revert_number,
-						revert_hash = ?ancestor_entry.block_hash,
-						"A block has signaled that its ancestor be reverted due to a bad parachain block.",
-					);
-
-					ancestor_entry
-				},
-			};
-
-		ancestor_entry.viability.explicitly_reverted = true;
-		propagate_viability_update(backend, ancestor_entry)?;
+		let maybe_block_entry = load_ancestor(backend, block_hash, block_number, revert_number)?;
+		if let Some(block_entry) = &maybe_block_entry {
+			gum::trace!(
+				target: LOG_TARGET,
+				?revert_number,
+				revert_hash = ?block_entry.block_hash,
+				"Block marked as reverted via scraped on-chain reversions"
+			);
+		}
+		revert_single_block_entry_if_present(
+			backend,
+			maybe_block_entry,
+			None,
+			revert_number,
+			Some(block_hash),
+			Some(block_number),
+		)?;
 	}
 
+	Ok(())
+}
+
+/// Marks a single block as explicitly reverted, then propagates viability updates
+/// to all its children. This is triggered when the disputes subsystem signals that
+/// a dispute has concluded against a candidate.
+pub(crate) fn apply_single_reversion(
+	backend: &mut OverlayedBackend<impl Backend>,
+	revert_hash: Hash,
+	revert_number: BlockNumber,
+) -> Result<(), Error> {
+	gum::trace!(
+		target: LOG_TARGET,
+		?revert_number,
+		?revert_hash,
+		"Block marked as reverted via ChainSelectionMessage::RevertBlocks"
+	);
+	let maybe_block_entry = backend.load_block_entry(&revert_hash)?;
+	revert_single_block_entry_if_present(
+		backend,
+		maybe_block_entry,
+		Some(revert_hash),
+		revert_number,
+		None,
+		None,
+	)?;
+	Ok(())
+}
+
+fn revert_single_block_entry_if_present(
+	backend: &mut OverlayedBackend<impl Backend>,
+	maybe_block_entry: Option<BlockEntry>,
+	maybe_revert_hash: Option<Hash>,
+	revert_number: BlockNumber,
+	maybe_reporting_hash: Option<Hash>,
+	maybe_reporting_number: Option<BlockNumber>,
+) -> Result<(), Error> {
+	match maybe_block_entry {
+		None => {
+			gum::warn!(
+				target: LOG_TARGET,
+				?maybe_revert_hash,
+				revert_target = revert_number,
+				?maybe_reporting_hash,
+				?maybe_reporting_number,
+				"The hammer has dropped. \
+				The protocol has indicated that a finalized block be reverted. \
+				Please inform an adult.",
+			);
+		},
+		Some(mut block_entry) => {
+			gum::info!(
+				target: LOG_TARGET,
+				?maybe_revert_hash,
+				revert_target = revert_number,
+				?maybe_reporting_hash,
+				?maybe_reporting_number,
+				"Unfinalized block reverted due to a bad parachain block.",
+			);
+
+			block_entry.viability.explicitly_reverted = true;
+			// Marks children of reverted block as non-viable
+			propagate_viability_update(backend, block_entry)?;
+		},
+	}
 	Ok(())
 }
 
@@ -533,12 +585,28 @@ pub(super) fn approve_block(
 pub(super) fn detect_stagnant<'a, B: 'a + Backend>(
 	backend: &'a B,
 	up_to: Timestamp,
+	max_elements: usize,
 ) -> Result<OverlayedBackend<'a, B>, Error> {
-	let stagnant_up_to = backend.load_stagnant_at_up_to(up_to)?;
+	let stagnant_up_to = backend.load_stagnant_at_up_to(up_to, max_elements)?;
 	let mut backend = OverlayedBackend::new(backend);
+
+	let (min_ts, max_ts) = match stagnant_up_to.len() {
+		0 => (0 as Timestamp, 0 as Timestamp),
+		1 => (stagnant_up_to[0].0, stagnant_up_to[0].0),
+		n => (stagnant_up_to[0].0, stagnant_up_to[n - 1].0),
+	};
 
 	// As this is in ascending order, only the earliest stagnant
 	// blocks will involve heavy viability propagations.
+	gum::debug!(
+		target: LOG_TARGET,
+		?up_to,
+		?min_ts,
+		?max_ts,
+		"Prepared {} stagnant entries for checking/pruning",
+		stagnant_up_to.len()
+	);
+
 	for (timestamp, maybe_stagnant) in stagnant_up_to {
 		backend.delete_stagnant_at(timestamp);
 
@@ -549,15 +617,162 @@ pub(super) fn detect_stagnant<'a, B: 'a + Backend>(
 					entry.viability.approval = Approval::Stagnant;
 				}
 				let is_viable = entry.viability.is_viable();
+				gum::trace!(
+					target: LOG_TARGET,
+					?block_hash,
+					?timestamp,
+					?was_viable,
+					?is_viable,
+					"Found existing stagnant entry"
+				);
 
 				if was_viable && !is_viable {
 					propagate_viability_update(&mut backend, entry)?;
 				} else {
 					backend.write_block_entry(entry);
 				}
+			} else {
+				gum::trace!(
+					target: LOG_TARGET,
+					?block_hash,
+					?timestamp,
+					"Found non-existing stagnant entry"
+				);
 			}
 		}
 	}
+
+	Ok(backend)
+}
+
+/// Prune stagnant entries at some timestamp without other checks
+/// This function is intended just to clean leftover entries when the real
+/// stagnant checks are disabled
+pub(super) fn prune_only_stagnant<'a, B: 'a + Backend>(
+	backend: &'a B,
+	up_to: Timestamp,
+	max_elements: usize,
+) -> Result<OverlayedBackend<'a, B>, Error> {
+	let stagnant_up_to = backend.load_stagnant_at_up_to(up_to, max_elements)?;
+	let mut backend = OverlayedBackend::new(backend);
+
+	let (min_ts, max_ts) = match stagnant_up_to.len() {
+		0 => (0 as Timestamp, 0 as Timestamp),
+		1 => (stagnant_up_to[0].0, stagnant_up_to[0].0),
+		n => (stagnant_up_to[0].0, stagnant_up_to[n - 1].0),
+	};
+
+	gum::debug!(
+		target: LOG_TARGET,
+		?up_to,
+		?min_ts,
+		?max_ts,
+		"Prepared {} stagnant entries for pruning",
+		stagnant_up_to.len()
+	);
+
+	for (timestamp, _) in stagnant_up_to {
+		backend.delete_stagnant_at(timestamp);
+	}
+
+	Ok(backend)
+}
+
+/// Revert the tree to the block relative to `hash`.
+///
+/// This accepts a fresh backend and returns an overlay on top of it representing
+/// all changes made.
+pub(super) fn revert_to<'a, B: Backend + 'a>(
+	backend: &'a B,
+	hash: Hash,
+) -> Result<OverlayedBackend<'a, B>, Error> {
+	let first_number = backend.load_first_block_number()?.unwrap_or_default();
+
+	let mut backend = OverlayedBackend::new(backend);
+
+	let mut entry = match backend.load_block_entry(&hash)? {
+		Some(entry) => entry,
+		None => {
+			// May be a revert to the last finalized block. If this is the case,
+			// then revert to this block should be handled specially since no
+			// information about finalized blocks is persisted within the tree.
+			//
+			// We use part of the information contained in the finalized block
+			// children (that are expected to be in the tree) to construct a
+			// dummy block entry for the last finalized block. This will be
+			// wiped as soon as the next block is finalized.
+
+			let blocks = backend.load_blocks_by_number(first_number)?;
+
+			let block = blocks
+				.first()
+				.and_then(|hash| backend.load_block_entry(hash).ok())
+				.flatten()
+				.ok_or_else(|| {
+					ChainApiError::from(format!(
+						"Lookup failure for block at height {}",
+						first_number
+					))
+				})?;
+
+			// The parent is expected to be the last finalized block.
+			if block.parent_hash != hash {
+				return Err(ChainApiError::from("Can't revert below last finalized block").into())
+			}
+
+			// The weight is set to the one of the first child. Even though this is
+			// not accurate, it does the job. The reason is that the revert point is
+			// the last finalized block, i.e. this is the best and only choice.
+			let block_number = first_number.saturating_sub(1);
+			let viability = ViabilityCriteria {
+				explicitly_reverted: false,
+				approval: Approval::Approved,
+				earliest_unviable_ancestor: None,
+			};
+			let entry = BlockEntry {
+				block_hash: hash,
+				block_number,
+				parent_hash: Hash::default(),
+				children: blocks,
+				viability,
+				weight: block.weight,
+			};
+			// This becomes the first entry according to the block number.
+			backend.write_blocks_by_number(block_number, vec![hash]);
+			entry
+		},
+	};
+
+	let mut stack: Vec<_> = std::mem::take(&mut entry.children)
+		.into_iter()
+		.map(|h| (h, entry.block_number + 1))
+		.collect();
+
+	// Write revert point block entry without the children.
+	backend.write_block_entry(entry.clone());
+
+	let mut viable_leaves = backend.load_leaves()?;
+
+	viable_leaves.insert(LeafEntry {
+		block_hash: hash,
+		block_number: entry.block_number,
+		weight: entry.weight,
+	});
+
+	while let Some((hash, number)) = stack.pop() {
+		let entry = backend.load_block_entry(&hash)?;
+		backend.delete_block_entry(&hash);
+
+		viable_leaves.remove(&hash);
+
+		let mut blocks_at_height = backend.load_blocks_by_number(number)?;
+		blocks_at_height.retain(|h| h != &hash);
+		backend.write_blocks_by_number(number, blocks_at_height);
+
+		stack.extend(entry.into_iter().flat_map(|e| e.children).map(|h| (h, number + 1)));
+	}
+
+	backend.write_leaves(viable_leaves);
 
 	Ok(backend)
 }

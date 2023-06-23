@@ -1,4 +1,4 @@
-// Copyright 2021 Parity Technologies (UK) Ltd.
+// Copyright (C) Parity Technologies (UK) Ltd.
 // This file is part of Polkadot.
 
 // Polkadot is free software: you can redistribute it and/or modify
@@ -18,9 +18,9 @@ use fatality::Nested;
 use futures::channel::oneshot;
 
 use polkadot_node_subsystem::{errors::ChainApiError, SubsystemError};
-use polkadot_node_subsystem_util::{rolling_session_window::SessionsUnavailable, runtime};
+use polkadot_node_subsystem_util::runtime;
 
-use crate::{real::participation, LOG_TARGET};
+use crate::{db, participation, LOG_TARGET};
 use parity_scale_codec::Error as CodecError;
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -54,6 +54,10 @@ pub enum Error {
 	DbWriteFailed(std::io::Error),
 
 	#[fatal]
+	#[error("Reading from database failed: {0}")]
+	DbReadFailed(db::v1::Error),
+
+	#[fatal]
 	#[error("Oneshot for receiving block number from chain API got cancelled")]
 	CanceledBlockNumber,
 
@@ -82,7 +86,7 @@ pub enum Error {
 	#[error(transparent)]
 	Oneshot(#[from] oneshot::Canceled),
 
-	#[error("Dispute import confirmation send failed (receiver canceled)")]
+	#[error("Could not send import confirmation (receiver canceled)")]
 	DisputeImportOneshotSend,
 
 	#[error(transparent)]
@@ -92,8 +96,8 @@ pub enum Error {
 	Codec(#[from] CodecError),
 
 	/// `RollingSessionWindow` was not able to retrieve `SessionInfo`s.
-	#[error("Sessions unavailable in `RollingSessionWindow`: {0}")]
-	RollingSessionWindow(#[from] SessionsUnavailable),
+	#[error("Session can't be fetched via `RuntimeInfo`")]
+	SessionInfo,
 
 	#[error(transparent)]
 	QueueError(#[from] participation::QueueError),
@@ -118,7 +122,7 @@ impl JfyiError {
 	pub fn log(self) {
 		match self {
 			// don't spam the log with spurious errors
-			Self::Runtime(_) | Self::Oneshot(_) | Self::DisputeImportOneshotSend => {
+			Self::Runtime(runtime::Error::RuntimeRequestCanceled(_)) | Self::Oneshot(_) => {
 				gum::debug!(target: LOG_TARGET, error = ?self)
 			},
 			// it's worth reporting otherwise
