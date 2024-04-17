@@ -11,7 +11,7 @@
 // MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 // GNU General Public License for more details.
 
-//! A module exporting runtime API implementation functions for all runtime APIs using v5
+//! A module exporting runtime API implementation functions for all runtime APIs using `v5`
 //! primitives.
 //!
 //! Runtimes implementing the v2 runtime API are recommended to forward directly to these
@@ -21,13 +21,14 @@ use crate::{
 	configuration, disputes, dmp, hrmp, inclusion, initializer, paras, paras_inherent, scheduler,
 	session_info, shared,
 };
+use frame_system::pallet_prelude::*;
 use primitives::{
 	slashing, AuthorityDiscoveryId, CandidateEvent, CandidateHash, CommittedCandidateReceipt,
 	CoreIndex, CoreOccupied, CoreState, DisputeState, ExecutorParams, GroupIndex,
 	GroupRotationInfo, Hash, Id as ParaId, InboundDownwardMessage, InboundHrmpMessage,
 	OccupiedCore, OccupiedCoreAssumption, PersistedValidationData, PvfCheckStatement,
-	ScheduledCore, ScrapedOnChainVotes, SessionIndex, SessionInfo, ValidationCode,
-	ValidationCodeHash, ValidatorId, ValidatorIndex, ValidatorSignature,
+	ScrapedOnChainVotes, SessionIndex, SessionInfo, ValidationCode, ValidationCodeHash,
+	ValidatorId, ValidatorIndex, ValidatorSignature,
 };
 use sp_runtime::traits::One;
 use sp_std::{collections::btree_map::BTreeMap, prelude::*};
@@ -39,7 +40,7 @@ pub fn validators<T: initializer::Config>() -> Vec<ValidatorId> {
 
 /// Implementation for the `validator_groups` function of the runtime API.
 pub fn validator_groups<T: initializer::Config>(
-) -> (Vec<Vec<ValidatorIndex>>, GroupRotationInfo<T::BlockNumber>) {
+) -> (Vec<Vec<ValidatorIndex>>, GroupRotationInfo<BlockNumberFor<T>>) {
 	let now = <frame_system::Pallet<T>>::block_number() + One::one();
 
 	let groups = <scheduler::Pallet<T>>::validator_groups();
@@ -49,15 +50,10 @@ pub fn validator_groups<T: initializer::Config>(
 }
 
 /// Implementation for the `availability_cores` function of the runtime API.
-pub fn availability_cores<T: initializer::Config>() -> Vec<CoreState<T::Hash, T::BlockNumber>> {
+pub fn availability_cores<T: initializer::Config>() -> Vec<CoreState<T::Hash, BlockNumberFor<T>>> {
 	let cores = <scheduler::Pallet<T>>::availability_cores();
-	let parachains = <paras::Pallet<T>>::parachains();
 	let config = <configuration::Pallet<T>>::config();
-
 	let now = <frame_system::Pallet<T>>::block_number() + One::one();
-	<scheduler::Pallet<T>>::clear();
-	<scheduler::Pallet<T>>::schedule(Vec::new(), now);
-
 	let rotation_info = <scheduler::Pallet<T>>::group_rotation_info(now);
 
 	let time_out_at = |backed_in_number, availability_period| {
@@ -101,73 +97,39 @@ pub fn availability_cores<T: initializer::Config>() -> Vec<CoreState<T::Hash, T:
 		.into_iter()
 		.enumerate()
 		.map(|(i, core)| match core {
-			Some(occupied) => CoreState::Occupied(match occupied {
-				CoreOccupied::Parachain => {
-					let para_id = parachains[i];
-					let pending_availability =
-						<inclusion::Pallet<T>>::pending_availability(para_id)
-							.expect("Occupied core always has pending availability; qed");
+			CoreOccupied::Paras(entry) => {
+				let pending_availability =
+					<inclusion::Pallet<T>>::pending_availability(entry.para_id())
+						.expect("Occupied core always has pending availability; qed");
 
-					let backed_in_number = *pending_availability.backed_in_number();
-					OccupiedCore {
-						next_up_on_available: <scheduler::Pallet<T>>::next_up_on_available(
-							CoreIndex(i as u32),
-						),
-						occupied_since: backed_in_number,
-						time_out_at: time_out_at(
-							backed_in_number,
-							config.chain_availability_period,
-						),
-						next_up_on_time_out: <scheduler::Pallet<T>>::next_up_on_time_out(
-							CoreIndex(i as u32),
-						),
-						availability: pending_availability.availability_votes().clone(),
-						group_responsible: group_responsible_for(
-							backed_in_number,
-							pending_availability.core_occupied(),
-						),
-						candidate_hash: pending_availability.candidate_hash(),
-						candidate_descriptor: pending_availability.candidate_descriptor().clone(),
-					}
-				},
-				CoreOccupied::Parathread(p) => {
-					let para_id = p.claim.0;
-					let pending_availability =
-						<inclusion::Pallet<T>>::pending_availability(para_id)
-							.expect("Occupied core always has pending availability; qed");
-
-					let backed_in_number = *pending_availability.backed_in_number();
-					OccupiedCore {
-						next_up_on_available: <scheduler::Pallet<T>>::next_up_on_available(
-							CoreIndex(i as u32),
-						),
-						occupied_since: backed_in_number,
-						time_out_at: time_out_at(
-							backed_in_number,
-							config.thread_availability_period,
-						),
-						next_up_on_time_out: <scheduler::Pallet<T>>::next_up_on_time_out(
-							CoreIndex(i as u32),
-						),
-						availability: pending_availability.availability_votes().clone(),
-						group_responsible: group_responsible_for(
-							backed_in_number,
-							pending_availability.core_occupied(),
-						),
-						candidate_hash: pending_availability.candidate_hash(),
-						candidate_descriptor: pending_availability.candidate_descriptor().clone(),
-					}
-				},
-			}),
-			None => CoreState::Free,
+				let backed_in_number = *pending_availability.backed_in_number();
+				CoreState::Occupied(OccupiedCore {
+					next_up_on_available: <scheduler::Pallet<T>>::next_up_on_available(CoreIndex(
+						i as u32,
+					)),
+					occupied_since: backed_in_number,
+					time_out_at: time_out_at(backed_in_number, config.paras_availability_period),
+					next_up_on_time_out: <scheduler::Pallet<T>>::next_up_on_time_out(CoreIndex(
+						i as u32,
+					)),
+					availability: pending_availability.availability_votes().clone(),
+					group_responsible: group_responsible_for(
+						backed_in_number,
+						pending_availability.core_occupied(),
+					),
+					candidate_hash: pending_availability.candidate_hash(),
+					candidate_descriptor: pending_availability.candidate_descriptor().clone(),
+				})
+			},
+			CoreOccupied::Free => CoreState::Free,
 		})
 		.collect();
 
 	// This will overwrite only `Free` cores if the scheduler module is working as intended.
-	for scheduled in <scheduler::Pallet<T>>::scheduled() {
-		core_states[scheduled.core.0 as usize] = CoreState::Scheduled(ScheduledCore {
-			para_id: scheduled.para_id,
-			collator: scheduled.required_collator().map(|c| c.clone()),
+	for scheduled in <scheduler::Pallet<T>>::scheduled_claimqueue() {
+		core_states[scheduled.core.0 as usize] = CoreState::Scheduled(primitives::ScheduledCore {
+			para_id: scheduled.paras_entry.para_id(),
+			collator: None,
 		});
 	}
 
@@ -176,7 +138,7 @@ pub fn availability_cores<T: initializer::Config>() -> Vec<CoreState<T::Hash, T:
 
 /// Returns current block number being processed and the corresponding root hash.
 fn current_relay_parent<T: frame_system::Config>(
-) -> (<T as frame_system::Config>::BlockNumber, <T as frame_system::Config>::Hash) {
+) -> (BlockNumberFor<T>, <T as frame_system::Config>::Hash) {
 	use parity_scale_codec::Decode as _;
 	let state_version = <frame_system::Pallet<T>>::runtime_version().state_version();
 	let relay_parent_number = <frame_system::Pallet<T>>::block_number();
@@ -214,7 +176,7 @@ where
 pub fn persisted_validation_data<T: initializer::Config>(
 	para_id: ParaId,
 	assumption: OccupiedCoreAssumption,
-) -> Option<PersistedValidationData<T::Hash, T::BlockNumber>> {
+) -> Option<PersistedValidationData<T::Hash, BlockNumberFor<T>>> {
 	let (relay_parent_number, relay_parent_storage_root) = current_relay_parent::<T>();
 	with_assumption::<T, _, _>(para_id, assumption, || {
 		crate::util::make_persisted_validation_data::<T>(
@@ -229,7 +191,7 @@ pub fn persisted_validation_data<T: initializer::Config>(
 pub fn assumed_validation_data<T: initializer::Config>(
 	para_id: ParaId,
 	expected_persisted_validation_data_hash: Hash,
-) -> Option<(PersistedValidationData<T::Hash, T::BlockNumber>, ValidationCodeHash)> {
+) -> Option<(PersistedValidationData<T::Hash, BlockNumberFor<T>>, ValidationCodeHash)> {
 	let (relay_parent_number, relay_parent_storage_root) = current_relay_parent::<T>();
 	// This closure obtains the `persisted_validation_data` for the given `para_id` and matches
 	// its hash against an expected one.
@@ -259,7 +221,12 @@ pub fn check_validation_outputs<T: initializer::Config>(
 	para_id: ParaId,
 	outputs: primitives::CandidateCommitments,
 ) -> bool {
-	<inclusion::Pallet<T>>::check_validation_outputs_for_runtime_api(para_id, outputs)
+	let relay_parent_number = <frame_system::Pallet<T>>::block_number();
+	<inclusion::Pallet<T>>::check_validation_outputs_for_runtime_api(
+		para_id,
+		relay_parent_number,
+		outputs,
+	)
 }
 
 /// Implementation for the `session_index_for_child` function of the runtime API.
@@ -355,14 +322,14 @@ pub fn session_info<T: session_info::Config>(index: SessionIndex) -> Option<Sess
 /// Implementation for the `dmq_contents` function of the runtime API.
 pub fn dmq_contents<T: dmp::Config>(
 	recipient: ParaId,
-) -> Vec<InboundDownwardMessage<T::BlockNumber>> {
+) -> Vec<InboundDownwardMessage<BlockNumberFor<T>>> {
 	<dmp::Pallet<T>>::dmq_contents(recipient)
 }
 
 /// Implementation for the `inbound_hrmp_channels_contents` function of the runtime API.
 pub fn inbound_hrmp_channels_contents<T: hrmp::Config>(
 	recipient: ParaId,
-) -> BTreeMap<ParaId, Vec<InboundHrmpMessage<T::BlockNumber>>> {
+) -> BTreeMap<ParaId, Vec<InboundHrmpMessage<BlockNumberFor<T>>>> {
 	<hrmp::Pallet<T>>::inbound_hrmp_channels_contents(recipient)
 }
 
@@ -392,7 +359,8 @@ pub fn pvfs_require_precheck<T: paras::Config>() -> Vec<ValidationCodeHash> {
 	<paras::Pallet<T>>::pvfs_require_precheck()
 }
 
-/// Returns the validation code hash for the given parachain making the given `OccupiedCoreAssumption`.
+/// Returns the validation code hash for the given parachain making the given
+/// `OccupiedCoreAssumption`.
 pub fn validation_code_hash<T>(
 	para_id: ParaId,
 	assumption: OccupiedCoreAssumption,
@@ -407,7 +375,7 @@ where
 
 /// Implementation for `get_session_disputes` function from the runtime API
 pub fn get_session_disputes<T: disputes::Config>(
-) -> Vec<(SessionIndex, CandidateHash, DisputeState<T::BlockNumber>)> {
+) -> Vec<(SessionIndex, CandidateHash, DisputeState<BlockNumberFor<T>>)> {
 	<disputes::Pallet<T>>::disputes()
 }
 

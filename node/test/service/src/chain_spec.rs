@@ -156,9 +156,13 @@ fn polkadot_testnet_genesis(
 		babe: runtime::BabeConfig {
 			authorities: vec![],
 			epoch_config: Some(BABE_GENESIS_EPOCH_CONFIG),
+			..Default::default()
 		},
 		grandpa: Default::default(),
-		authority_discovery: runtime::AuthorityDiscoveryConfig { keys: vec![] },
+		authority_discovery: runtime::AuthorityDiscoveryConfig {
+			keys: vec![],
+			..Default::default()
+		},
 		claims: runtime::ClaimsConfig { claims: vec![], vesting: vec![] },
 		vesting: runtime::VestingConfig { vesting: vec![] },
 		sudo: runtime::SudoConfig { key: Some(root_key) },
@@ -171,8 +175,7 @@ fn polkadot_testnet_genesis(
 				max_pov_size: MAX_POV_SIZE,
 				max_head_data_size: 32 * 1024,
 				group_rotation_frequency: 20,
-				chain_availability_period: 4,
-				thread_availability_period: 4,
+				paras_availability_period: 4,
 				no_show_slots: 10,
 				minimum_validation_upgrade_delay: 5,
 				..Default::default()

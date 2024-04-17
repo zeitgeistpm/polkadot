@@ -17,7 +17,7 @@
 //! Mocks for all the traits.
 
 use crate::{
-	configuration, disputes, dmp, hrmp,
+	assigner, assigner_on_demand, assigner_parachains, configuration, disputes, dmp, hrmp,
 	inclusion::{self, AggregateMessageOrigin, UmpQueueId},
 	initializer, origin, paras,
 	paras::ParaKind,
@@ -27,34 +27,31 @@ use crate::{
 use frame_support::{
 	assert_ok, parameter_types,
 	traits::{
-		Currency, GenesisBuild, ProcessMessage, ProcessMessageError, ValidatorSet,
-		ValidatorSetWithIdentification,
+		Currency, ProcessMessage, ProcessMessageError, ValidatorSet, ValidatorSetWithIdentification,
 	},
 	weights::{Weight, WeightMeter},
 };
 use frame_support_test::TestRandomness;
+use frame_system::limits;
 use parity_scale_codec::Decode;
 use primitives::{
-	AuthorityDiscoveryId, Balance, BlockNumber, CandidateHash, Header, Moment, SessionIndex,
-	UpwardMessage, ValidationCode, ValidatorIndex,
+	AuthorityDiscoveryId, Balance, BlockNumber, CandidateHash, Moment, SessionIndex, UpwardMessage,
+	ValidationCode, ValidatorIndex,
 };
 use sp_core::{ConstU32, H256};
 use sp_io::TestExternalities;
 use sp_runtime::{
 	traits::{AccountIdConversion, BlakeTwo256, IdentityLookup},
 	transaction_validity::TransactionPriority,
-	Permill,
+	BuildStorage, FixedU128, Perbill, Permill,
 };
 use std::{cell::RefCell, collections::HashMap};
 
 type UncheckedExtrinsic = frame_system::mocking::MockUncheckedExtrinsic<Test>;
-type Block = frame_system::mocking::MockBlock<Test>;
+type Block = frame_system::mocking::MockBlockU32<Test>;
 
 frame_support::construct_runtime!(
-	pub enum Test where
-		Block = Block,
-		NodeBlock = Block,
-		UncheckedExtrinsic = UncheckedExtrinsic,
+	pub enum Test
 	{
 		System: frame_system,
 		Balances: pallet_balances,
@@ -65,6 +62,9 @@ frame_support::construct_runtime!(
 		ParaInclusion: inclusion,
 		ParaInherent: paras_inherent,
 		Scheduler: scheduler,
+		Assigner: assigner,
+		OnDemandAssigner: assigner_on_demand,
+		ParachainsAssigner: assigner_parachains,
 		Initializer: initializer,
 		Dmp: dmp,
 		Hrmp: hrmp,
@@ -85,10 +85,11 @@ where
 
 parameter_types! {
 	pub const BlockHashCount: u32 = 250;
-	pub BlockWeights: frame_system::limits::BlockWeights =
+	pub static BlockWeights: frame_system::limits::BlockWeights =
 		frame_system::limits::BlockWeights::simple_max(
 			Weight::from_parts(4 * 1024 * 1024, u64::MAX),
 		);
+	pub static BlockLength: limits::BlockLength = limits::BlockLength::max_with_normal_ratio(u32::MAX, Perbill::from_percent(75));
 }
 
 pub type AccountId = u64;
@@ -96,17 +97,16 @@ pub type AccountId = u64;
 impl frame_system::Config for Test {
 	type BaseCallFilter = frame_support::traits::Everything;
 	type BlockWeights = BlockWeights;
-	type BlockLength = ();
+	type BlockLength = BlockLength;
 	type DbWeight = ();
 	type RuntimeOrigin = RuntimeOrigin;
 	type RuntimeCall = RuntimeCall;
-	type Index = u64;
-	type BlockNumber = BlockNumber;
+	type Nonce = u64;
 	type Hash = H256;
 	type Hashing = BlakeTwo256;
 	type AccountId = u64;
 	type Lookup = IdentityLookup<u64>;
-	type Header = Header;
+	type Block = Block;
 	type RuntimeEvent = RuntimeEvent;
 	type BlockHashCount = BlockHashCount;
 	type Version = ();
@@ -156,6 +156,7 @@ impl pallet_babe::Config for Test {
 	type DisabledValidators = ();
 	type WeightInfo = ();
 	type MaxAuthorities = MaxAuthorities;
+	type MaxNominators = ConstU32<0>;
 	type KeyOwnerProof = sp_core::Void;
 	type EquivocationReportSystem = ();
 }
@@ -224,6 +225,7 @@ parameter_types! {
 impl crate::hrmp::Config for Test {
 	type RuntimeOrigin = RuntimeOrigin;
 	type RuntimeEvent = RuntimeEvent;
+	type ChannelManager = frame_system::EnsureRoot<u64>;
 	type Currency = pallet_balances::Pallet<Test>;
 	type WeightInfo = crate::hrmp::TestWeightInfo;
 }
@@ -282,7 +284,9 @@ impl crate::disputes::SlashingHandler<BlockNumber> for Test {
 	fn initializer_on_new_session(_: SessionIndex) {}
 }
 
-impl crate::scheduler::Config for Test {}
+impl crate::scheduler::Config for Test {
+	type AssignmentProvider = Assigner;
+}
 
 pub struct TestMessageQueueWeight;
 impl pallet_message_queue::WeightInfo for TestMessageQueueWeight {
@@ -329,9 +333,28 @@ impl pallet_message_queue::Config for Test {
 	type WeightInfo = TestMessageQueueWeight;
 	type MessageProcessor = TestProcessMessage;
 	type QueueChangeHandler = ParaInclusion;
+	type QueuePausedQuery = ();
 	type HeapSize = ConstU32<65536>;
 	type MaxStale = ConstU32<8>;
 	type ServiceWeight = MessageQueueServiceWeight;
+}
+
+impl assigner::Config for Test {
+	type ParachainsAssignmentProvider = ParachainsAssigner;
+	type OnDemandAssignmentProvider = OnDemandAssigner;
+}
+
+impl assigner_parachains::Config for Test {}
+
+parameter_types! {
+	pub const OnDemandTrafficDefaultValue: FixedU128 = FixedU128::from_u32(1);
+}
+
+impl assigner_on_demand::Config for Test {
+	type RuntimeEvent = RuntimeEvent;
+	type Currency = Balances;
+	type TrafficDefaultValue = OnDemandTrafficDefaultValue;
+	type WeightInfo = crate::assigner_on_demand::TestWeightInfo;
 }
 
 impl crate::inclusion::Config for Test {
@@ -442,7 +465,7 @@ impl ProcessMessage for TestProcessMessage {
 			Ok(w) => Weight::from_parts(w as u64, w as u64),
 			Err(_) => return Err(ProcessMessageError::Corrupt), // same as the real `ProcessMessage`
 		};
-		if !meter.check_accrue(required) {
+		if meter.try_consume(required).is_err() {
 			return Err(ProcessMessageError::Overweight(required))
 		}
 
@@ -484,9 +507,9 @@ pub fn new_test_ext(state: MockGenesisConfig) -> TestExternalities {
 	BACKING_REWARDS.with(|r| r.borrow_mut().clear());
 	AVAILABILITY_REWARDS.with(|r| r.borrow_mut().clear());
 
-	let mut t = state.system.build_storage::<Test>().unwrap();
+	let mut t = state.system.build_storage().unwrap();
 	state.configuration.assimilate_storage(&mut t).unwrap();
-	GenesisBuild::<Test>::assimilate_storage(&state.paras, &mut t).unwrap();
+	state.paras.assimilate_storage(&mut t).unwrap();
 
 	let mut ext: TestExternalities = t.into();
 	ext.register_extension(KeystoreExt(Arc::new(MemoryKeystore::new()) as KeystorePtr));
@@ -496,9 +519,9 @@ pub fn new_test_ext(state: MockGenesisConfig) -> TestExternalities {
 
 #[derive(Default)]
 pub struct MockGenesisConfig {
-	pub system: frame_system::GenesisConfig,
+	pub system: frame_system::GenesisConfig<Test>,
 	pub configuration: crate::configuration::GenesisConfig<Test>,
-	pub paras: crate::paras::GenesisConfig,
+	pub paras: crate::paras::GenesisConfig<Test>,
 }
 
 pub fn assert_last_event(generic_event: RuntimeEvent) {

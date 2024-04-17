@@ -47,6 +47,7 @@ use crate::{
 	initializer, FeeTracker,
 };
 use frame_support::pallet_prelude::*;
+use frame_system::pallet_prelude::BlockNumberFor;
 use primitives::{DownwardMessage, Hash, Id as ParaId, InboundDownwardMessage};
 use sp_core::MAX_POSSIBLE_ALLOCATION;
 use sp_runtime::{
@@ -93,8 +94,9 @@ impl fmt::Debug for ProcessedDownwardMessagesAcceptanceErr {
 	fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
 		use ProcessedDownwardMessagesAcceptanceErr::*;
 		match *self {
-			AdvancementRule =>
-				write!(fmt, "DMQ is not empty, but processed_downward_messages is 0",),
+			AdvancementRule => {
+				write!(fmt, "DMQ is not empty, but processed_downward_messages is 0",)
+			},
 			Underflow { processed_downward_messages, dmq_length } => write!(
 				fmt,
 				"processed_downward_messages = {}, but dmq_length is only {}",
@@ -121,7 +123,7 @@ pub mod pallet {
 		_,
 		Twox64Concat,
 		ParaId,
-		Vec<InboundDownwardMessage<T::BlockNumber>>,
+		Vec<InboundDownwardMessage<BlockNumberFor<T>>>,
 		ValueQuery,
 	>;
 
@@ -150,7 +152,7 @@ pub mod pallet {
 /// Routines and getters related to downward message passing.
 impl<T: Config> Pallet<T> {
 	/// Block initialization logic, called by initializer.
-	pub(crate) fn initializer_initialize(_now: T::BlockNumber) -> Weight {
+	pub(crate) fn initializer_initialize(_now: BlockNumberFor<T>) -> Weight {
 		Weight::zero()
 	}
 
@@ -159,7 +161,7 @@ impl<T: Config> Pallet<T> {
 
 	/// Called by the initializer to note that a new session has started.
 	pub(crate) fn initializer_on_new_session(
-		_notification: &initializer::SessionChangeNotification<T::BlockNumber>,
+		_notification: &initializer::SessionChangeNotification<BlockNumberFor<T>>,
 		outgoing_paras: &[ParaId],
 	) {
 		Self::perform_outgoing_para_cleanup(outgoing_paras);
@@ -183,7 +185,7 @@ impl<T: Config> Pallet<T> {
 	/// in an error. If this returns `Ok(())` the caller can be certain that a call to
 	/// `queue_downward_message` with the same parameters will be successful.
 	pub fn can_queue_downward_message(
-		config: &HostConfiguration<T::BlockNumber>,
+		config: &HostConfiguration<BlockNumberFor<T>>,
 		para: &ParaId,
 		msg: &DownwardMessage,
 	) -> Result<(), QueueDownwardMessageError> {
@@ -209,7 +211,7 @@ impl<T: Config> Pallet<T> {
 	/// to a dangling storage. If the caller cannot statically prove that the recipient exists
 	/// then the caller should perform a runtime check.
 	pub fn queue_downward_message(
-		config: &HostConfiguration<T::BlockNumber>,
+		config: &HostConfiguration<BlockNumberFor<T>>,
 		para: ParaId,
 		msg: DownwardMessage,
 	) -> Result<(), QueueDownwardMessageError> {
@@ -253,13 +255,27 @@ impl<T: Config> Pallet<T> {
 	/// Checks if the number of processed downward messages is valid.
 	pub(crate) fn check_processed_downward_messages(
 		para: ParaId,
+		relay_parent_number: BlockNumberFor<T>,
 		processed_downward_messages: u32,
 	) -> Result<(), ProcessedDownwardMessagesAcceptanceErr> {
 		let dmq_length = Self::dmq_length(para);
 
 		if dmq_length > 0 && processed_downward_messages == 0 {
-			return Err(ProcessedDownwardMessagesAcceptanceErr::AdvancementRule)
+			// The advancement rule is for at least one downwards message to be processed
+			// if the queue is non-empty at the relay-parent. Downwards messages are annotated
+			// with the block number, so we compare the earliest (first) against the relay parent.
+			let contents = Self::dmq_contents(para);
+
+			// sanity: if dmq_length is >0 this should always be 'Some'.
+			if contents.get(0).map_or(false, |msg| msg.sent_at <= relay_parent_number) {
+				return Err(ProcessedDownwardMessagesAcceptanceErr::AdvancementRule)
+			}
 		}
+
+		// Note that we might be allowing a parachain to signal that it's processed
+		// messages that hadn't been placed in the queue at the relay_parent.
+		// only 'stupid' parachains would do it and we don't (and can't) force anyone
+		// to act on messages, so the lenient approach is fine here.
 		if dmq_length < processed_downward_messages {
 			return Err(ProcessedDownwardMessagesAcceptanceErr::Underflow {
 				processed_downward_messages,
@@ -316,7 +332,9 @@ impl<T: Config> Pallet<T> {
 	/// Returns the downward message queue contents for the given para.
 	///
 	/// The most recent messages are the latest in the vector.
-	pub(crate) fn dmq_contents(recipient: ParaId) -> Vec<InboundDownwardMessage<T::BlockNumber>> {
+	pub(crate) fn dmq_contents(
+		recipient: ParaId,
+	) -> Vec<InboundDownwardMessage<BlockNumberFor<T>>> {
 		DownwardMessageQueues::<T>::get(&recipient)
 	}
 

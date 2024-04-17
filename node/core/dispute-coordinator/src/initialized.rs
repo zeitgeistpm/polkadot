@@ -92,8 +92,8 @@ pub struct InitialData {
 pub(crate) struct Initialized {
 	keystore: Arc<LocalKeystore>,
 	runtime_info: RuntimeInfo,
-	/// This is the highest `SessionIndex` seen via `ActiveLeavesUpdate`. It doen't matter if it was
-	/// cached successfully or not. It is used to detect ancient disputes.
+	/// This is the highest `SessionIndex` seen via `ActiveLeavesUpdate`. It doesn't matter if it
+	/// was cached successfully or not. It is used to detect ancient disputes.
 	highest_session_seen: SessionIndex,
 	/// Will be set to `true` if an error occured during the last caching attempt
 	gaps_in_cache: bool,
@@ -308,8 +308,8 @@ impl Initialized {
 				Ok(session_idx)
 					if self.gaps_in_cache || session_idx > self.highest_session_seen =>
 				{
-					// Fetch the last `DISPUTE_WINDOW` number of sessions unless there are no gaps in
-					// cache and we are not missing too many `SessionInfo`s
+					// Fetch the last `DISPUTE_WINDOW` number of sessions unless there are no gaps
+					// in cache and we are not missing too many `SessionInfo`s
 					let mut lower_bound = session_idx.saturating_sub(DISPUTE_WINDOW.get() - 1);
 					if !self.gaps_in_cache && self.highest_session_seen > lower_bound {
 						lower_bound = self.highest_session_seen + 1
@@ -1003,6 +1003,16 @@ impl Initialized {
 
 		gum::trace!(target: LOG_TARGET, ?candidate_hash, ?session, "Loaded votes");
 
+		let controlled_indices = env.controlled_indices();
+		let own_statements = statements
+			.iter()
+			.filter(|(statement, validator_index)| {
+				controlled_indices.contains(validator_index) &&
+					*statement.candidate_hash() == candidate_hash
+			})
+			.cloned()
+			.collect::<Vec<_>>();
+
 		let import_result = {
 			let intermediate_result = old_state.import_statements(&env, statements, now);
 
@@ -1123,8 +1133,8 @@ impl Initialized {
 		}
 
 		// Participate in dispute if we did not cast a vote before and actually have keys to cast a
-		// local vote. Disputes should fall in one of the categories below, otherwise we will refrain
-		// from participation:
+		// local vote. Disputes should fall in one of the categories below, otherwise we will
+		// refrain from participation:
 		// - `is_included` lands in prioritised queue
 		// - `is_confirmed` | `is_backed` lands in best effort queue
 		// We don't participate in disputes on finalized candidates.
@@ -1307,6 +1317,16 @@ impl Initialized {
 				session,
 				"Dispute on candidate concluded with 'valid' result",
 			);
+			for (statement, validator_index) in own_statements.iter() {
+				if statement.statement().indicates_invalidity() {
+					gum::warn!(
+						target: LOG_TARGET,
+						?candidate_hash,
+						?validator_index,
+						"Voted against a candidate that was concluded valid.",
+					);
+				}
+			}
 			self.metrics.on_concluded_valid();
 		}
 		if import_result.is_freshly_concluded_against() {
@@ -1316,6 +1336,16 @@ impl Initialized {
 				session,
 				"Dispute on candidate concluded with 'invalid' result",
 			);
+			for (statement, validator_index) in own_statements.iter() {
+				if statement.statement().indicates_validity() {
+					gum::warn!(
+						target: LOG_TARGET,
+						?candidate_hash,
+						?validator_index,
+						"Voted for a candidate that was concluded invalid.",
+					);
+				}
+			}
 			self.metrics.on_concluded_invalid();
 		}
 

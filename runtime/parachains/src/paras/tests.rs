@@ -280,7 +280,6 @@ fn para_past_code_pruning_in_initialize() {
 		paras: GenesisConfig { paras, ..Default::default() },
 		configuration: crate::configuration::GenesisConfig {
 			config: HostConfiguration { code_retention_period, ..Default::default() },
-			..Default::default()
 		},
 		..Default::default()
 	};
@@ -333,7 +332,6 @@ fn note_new_head_sets_head() {
 		paras: GenesisConfig { paras, ..Default::default() },
 		configuration: crate::configuration::GenesisConfig {
 			config: HostConfiguration { code_retention_period, ..Default::default() },
-			..Default::default()
 		},
 		..Default::default()
 	};
@@ -375,7 +373,6 @@ fn note_past_code_sets_up_pruning_correctly() {
 		paras: GenesisConfig { paras, ..Default::default() },
 		configuration: crate::configuration::GenesisConfig {
 			config: HostConfiguration { code_retention_period, ..Default::default() },
-			..Default::default()
 		},
 		..Default::default()
 	};
@@ -422,10 +419,8 @@ fn code_upgrade_applied_after_delay() {
 				code_retention_period,
 				validation_upgrade_delay,
 				validation_upgrade_cooldown,
-				pvf_checking_enabled: false,
 				..Default::default()
 			},
-			..Default::default()
 		},
 		..Default::default()
 	};
@@ -441,7 +436,7 @@ fn code_upgrade_applied_after_delay() {
 		run_to_block(2, Some(vec![1]));
 		assert_eq!(Paras::current_code(&para_id), Some(original_code.clone()));
 
-		let expected_at = {
+		let (expected_at, next_possible_upgrade_at) = {
 			// this parablock is in the context of block 1.
 			let expected_at = 1 + validation_upgrade_delay;
 			let next_possible_upgrade_at = 1 + validation_upgrade_cooldown;
@@ -460,7 +455,7 @@ fn code_upgrade_applied_after_delay() {
 			check_code_is_stored(&original_code);
 			check_code_is_stored(&new_code);
 
-			expected_at
+			(expected_at, next_possible_upgrade_at)
 		};
 
 		run_to_block(expected_at, None);
@@ -495,8 +490,20 @@ fn code_upgrade_applied_after_delay() {
 			assert!(FutureCodeHash::<Test>::get(&para_id).is_none());
 			assert!(UpgradeGoAheadSignal::<Test>::get(&para_id).is_none());
 			assert_eq!(Paras::current_code(&para_id), Some(new_code.clone()));
+			assert_eq!(
+				UpgradeRestrictionSignal::<Test>::get(&para_id),
+				Some(UpgradeRestriction::Present),
+			);
+			assert_eq!(UpgradeCooldowns::<Test>::get(), vec![(para_id, next_possible_upgrade_at)]);
 			check_code_is_stored(&original_code);
 			check_code_is_stored(&new_code);
+		}
+
+		run_to_block(next_possible_upgrade_at + 1, None);
+
+		{
+			assert!(UpgradeRestrictionSignal::<Test>::get(&para_id).is_none());
+			assert!(UpgradeCooldowns::<Test>::get().is_empty());
 		}
 	});
 }
@@ -524,10 +531,8 @@ fn code_upgrade_applied_after_delay_even_when_late() {
 				code_retention_period,
 				validation_upgrade_delay,
 				validation_upgrade_cooldown,
-				pvf_checking_enabled: false,
 				..Default::default()
 			},
-			..Default::default()
 		},
 		..Default::default()
 	};
@@ -568,7 +573,7 @@ fn code_upgrade_applied_after_delay_even_when_late() {
 		// the upgrade.
 		{
 			// The signal should be set to go-ahead until the new head is actually processed.
-			assert_eq!(UpgradeGoAheadSignal::<Test>::get(&para_id), Some(UpgradeGoAhead::GoAhead),);
+			assert_eq!(UpgradeGoAheadSignal::<Test>::get(&para_id), Some(UpgradeGoAhead::GoAhead));
 
 			Paras::note_new_head(para_id, Default::default(), expected_at + 4);
 
@@ -608,10 +613,8 @@ fn submit_code_change_when_not_allowed_is_err() {
 				code_retention_period,
 				validation_upgrade_delay,
 				validation_upgrade_cooldown,
-				pvf_checking_enabled: false,
 				..Default::default()
 			},
-			..Default::default()
 		},
 		..Default::default()
 	};
@@ -640,7 +643,8 @@ fn submit_code_change_when_not_allowed_is_err() {
 		Paras::schedule_code_upgrade(para_id, newer_code.clone(), 2, &Configuration::config());
 		assert_eq!(
 			FutureCodeUpgrades::<Test>::get(&para_id),
-			Some(1 + validation_upgrade_delay), // did not change since the same assertion from the last time.
+			Some(1 + validation_upgrade_delay), /* did not change since the same assertion from
+			                                     * the last time. */
 		);
 		assert_eq!(FutureCodeHash::<Test>::get(&para_id), Some(new_code.hash()));
 		check_code_is_not_stored(&newer_code);
@@ -679,10 +683,8 @@ fn upgrade_restriction_elapsed_doesnt_mean_can_upgrade() {
 				code_retention_period,
 				validation_upgrade_delay,
 				validation_upgrade_cooldown,
-				pvf_checking_enabled: false,
 				..Default::default()
 			},
-			..Default::default()
 		},
 		..Default::default()
 	};
@@ -741,15 +743,12 @@ fn full_parachain_cleanup_storage() {
 			config: HostConfiguration {
 				code_retention_period,
 				validation_upgrade_delay,
-				pvf_checking_enabled: false,
 				minimum_validation_upgrade_delay: 2,
 				// Those are not relevant to this test. However, HostConfiguration is still a
 				// subject for the consistency check.
-				chain_availability_period: 1,
-				thread_availability_period: 1,
+				paras_availability_period: 1,
 				..Default::default()
 			},
-			..Default::default()
 		},
 		..Default::default()
 	};
@@ -849,10 +848,6 @@ fn cannot_offboard_ongoing_pvf_check() {
 
 	let genesis_config = MockGenesisConfig {
 		paras: GenesisConfig { paras, ..Default::default() },
-		configuration: crate::configuration::GenesisConfig {
-			config: HostConfiguration { pvf_checking_enabled: true, ..Default::default() },
-			..Default::default()
-		},
 		..Default::default()
 	};
 
@@ -889,13 +884,7 @@ fn para_incoming_at_session() {
 	let code_b = ValidationCode(vec![1]);
 	let code_c = ValidationCode(vec![3]);
 
-	let genesis_config = MockGenesisConfig {
-		configuration: crate::configuration::GenesisConfig {
-			config: HostConfiguration { pvf_checking_enabled: true, ..Default::default() },
-			..Default::default()
-		},
-		..Default::default()
-	};
+	let genesis_config = MockGenesisConfig::default();
 
 	new_test_ext(genesis_config).execute_with(|| {
 		run_to_block(1, Some(vec![1]));
@@ -1013,10 +1002,8 @@ fn code_hash_at_returns_up_to_end_of_code_retention_period() {
 			config: HostConfiguration {
 				code_retention_period,
 				validation_upgrade_delay,
-				pvf_checking_enabled: false,
 				..Default::default()
 			},
-			..Default::default()
 		},
 		..Default::default()
 	};
@@ -1106,12 +1093,7 @@ fn pvf_check_coalescing_onboarding_and_upgrade() {
 	let genesis_config = MockGenesisConfig {
 		paras: GenesisConfig { paras, ..Default::default() },
 		configuration: crate::configuration::GenesisConfig {
-			config: HostConfiguration {
-				pvf_checking_enabled: true,
-				validation_upgrade_delay,
-				..Default::default()
-			},
-			..Default::default()
+			config: HostConfiguration { validation_upgrade_delay, ..Default::default() },
 		},
 		..Default::default()
 	};
@@ -1175,12 +1157,7 @@ fn pvf_check_onboarding_reject_on_expiry() {
 
 	let genesis_config = MockGenesisConfig {
 		configuration: crate::configuration::GenesisConfig {
-			config: HostConfiguration {
-				pvf_checking_enabled: true,
-				pvf_voting_ttl,
-				..Default::default()
-			},
-			..Default::default()
+			config: HostConfiguration { pvf_voting_ttl, ..Default::default() },
 		},
 		..Default::default()
 	};
@@ -1238,10 +1215,6 @@ fn pvf_check_upgrade_reject() {
 
 	let genesis_config = MockGenesisConfig {
 		paras: GenesisConfig { paras, ..Default::default() },
-		configuration: crate::configuration::GenesisConfig {
-			config: HostConfiguration { pvf_checking_enabled: true, ..Default::default() },
-			..Default::default()
-		},
 		..Default::default()
 	};
 
@@ -1318,13 +1291,7 @@ fn pvf_check_submit_vote() {
 		(validate_unsigned, dispatch_result)
 	};
 
-	let genesis_config = MockGenesisConfig {
-		configuration: crate::configuration::GenesisConfig {
-			config: HostConfiguration { pvf_checking_enabled: true, ..Default::default() },
-			..Default::default()
-		},
-		..Default::default()
-	};
+	let genesis_config = MockGenesisConfig::default();
 
 	new_test_ext(genesis_config).execute_with(|| {
 		// Important to run this to seed the validators.
@@ -1428,10 +1395,6 @@ fn include_pvf_check_statement_refunds_weight() {
 
 	let genesis_config = MockGenesisConfig {
 		paras: GenesisConfig { paras, ..Default::default() },
-		configuration: crate::configuration::GenesisConfig {
-			config: HostConfiguration { pvf_checking_enabled: true, ..Default::default() },
-			..Default::default()
-		},
 		..Default::default()
 	};
 
@@ -1580,8 +1543,9 @@ fn increase_code_ref_doesnt_have_allergy_on_add_trusted_validation_code() {
 
 #[test]
 fn add_trusted_validation_code_insta_approval() {
-	// In particular, this tests that `kick_off_pvf_check` reacts to the `add_trusted_validation_code`
-	// and uses the `CodeByHash::contains_key` which is what `add_trusted_validation_code` uses.
+	// In particular, this tests that `kick_off_pvf_check` reacts to the
+	// `add_trusted_validation_code` and uses the `CodeByHash::contains_key` which is what
+	// `add_trusted_validation_code` uses.
 	let para_id = 100.into();
 	let validation_code = ValidationCode(vec![1, 2, 3]);
 	let validation_upgrade_delay = 25;
@@ -1589,12 +1553,10 @@ fn add_trusted_validation_code_insta_approval() {
 	let genesis_config = MockGenesisConfig {
 		configuration: crate::configuration::GenesisConfig {
 			config: HostConfiguration {
-				pvf_checking_enabled: true,
 				validation_upgrade_delay,
 				minimum_validation_upgrade_delay,
 				..Default::default()
 			},
-			..Default::default()
 		},
 		..Default::default()
 	};
@@ -1609,8 +1571,7 @@ fn add_trusted_validation_code_insta_approval() {
 		Paras::schedule_code_upgrade(para_id, validation_code.clone(), 1, &Configuration::config());
 		Paras::note_new_head(para_id, HeadData::default(), 1);
 
-		// Verify that the code upgrade has `expected_at` set to `26`. This is the behavior
-		// equal to that of `pvf_checking_enabled: false`.
+		// Verify that the code upgrade has `expected_at` set to `26`.
 		assert_eq!(FutureCodeUpgrades::<Test>::get(&para_id), Some(1 + validation_upgrade_delay));
 
 		// Verify that the required events were emitted.
@@ -1633,12 +1594,10 @@ fn add_trusted_validation_code_enacts_existing_pvf_vote() {
 	let genesis_config = MockGenesisConfig {
 		configuration: crate::configuration::GenesisConfig {
 			config: HostConfiguration {
-				pvf_checking_enabled: true,
 				validation_upgrade_delay,
 				minimum_validation_upgrade_delay,
 				..Default::default()
 			},
-			..Default::default()
 		},
 		..Default::default()
 	};
@@ -1708,6 +1667,50 @@ fn verify_para_head_is_externally_accessible() {
 		let head_data = HeadData::decode(&mut encoded.as_ref());
 		assert_eq!(head_data, Ok(expected_head_data));
 	});
+}
+
+#[test]
+fn most_recent_context() {
+	let validation_code: ValidationCode = vec![1, 2, 3].into();
+
+	let genesis_config = MockGenesisConfig::default();
+
+	new_test_ext(genesis_config).execute_with(|| {
+		const EXPECTED_SESSION: SessionIndex = 1;
+		run_to_block(1, Some(vec![1]));
+
+		let para_id = ParaId::from(111);
+
+		assert_eq!(Paras::para_most_recent_context(para_id), None);
+
+		assert_ok!(Paras::schedule_para_initialize(
+			para_id,
+			ParaGenesisArgs {
+				para_kind: ParaKind::Parachain,
+				genesis_head: vec![1].into(),
+				validation_code: validation_code.clone(),
+			},
+		));
+		submit_super_majority_pvf_votes(&validation_code, EXPECTED_SESSION, true);
+
+		assert_eq!(ParaLifecycles::<Test>::get(&para_id), Some(ParaLifecycle::Onboarding));
+
+		// Two sessions pass, so action queue is triggered.
+		run_to_block(4, Some(vec![3, 4]));
+
+		// Double-check the para is onboarded, the context is set to the recent block.
+		assert_eq!(ParaLifecycles::<Test>::get(&para_id), Some(ParaLifecycle::Parachain));
+		assert_eq!(Paras::para_most_recent_context(para_id), Some(0));
+
+		// Progress para to the new head and check that the recent context is updated.
+		Paras::note_new_head(para_id, vec![4, 5, 6].into(), 3);
+		assert_eq!(Paras::para_most_recent_context(para_id), Some(3));
+
+		// Finally, offboard the para and expect the context to be cleared.
+		assert_ok!(Paras::schedule_para_cleanup(para_id));
+		run_to_block(6, Some(vec![5, 6]));
+		assert_eq!(Paras::para_most_recent_context(para_id), None);
+	})
 }
 
 #[test]

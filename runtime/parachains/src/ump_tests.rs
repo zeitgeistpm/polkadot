@@ -523,21 +523,21 @@ fn overweight_queue_works() {
 		assert_last_events(
 			[
 				pallet_message_queue::Event::<Test>::Processed {
-					id: hash_1.clone(),
+					id: hash_1,
 					origin: Ump(UmpQueueId::Para(para_a)),
 					weight_used: Weight::from_parts(301, 301),
 					success: true,
 				}
 				.into(),
 				pallet_message_queue::Event::<Test>::OverweightEnqueued {
-					id: hash_2.clone(),
+					id: hash_2,
 					origin: Ump(UmpQueueId::Para(para_a)),
 					page_index: 0,
 					message_index: 1,
 				}
 				.into(),
 				pallet_message_queue::Event::<Test>::OverweightEnqueued {
-					id: hash_3.clone(),
+					id: hash_3,
 					origin: Ump(UmpQueueId::Para(para_a)),
 					page_index: 0,
 					message_index: 2,
@@ -573,12 +573,20 @@ fn overweight_queue_works() {
 			.into(),
 		);
 
-		// ... and if we try to service a message with index that doesn't exist it will error
-		// out.
+		// But servicing again will not work.
 		assert_noop!(
 			<MessageQueue as ServiceQueues>::execute_overweight(
 				Weight::from_parts(501, 501),
 				(Ump(UmpQueueId::Para(para_a)), 0, 2)
+			),
+			ExecuteOverweightError::AlreadyProcessed,
+		);
+
+		// Using an invalid index does not work.
+		assert_noop!(
+			<MessageQueue as ServiceQueues>::execute_overweight(
+				Weight::from_parts(501, 501),
+				(Ump(UmpQueueId::Para(para_a)), 0, 3)
 			),
 			ExecuteOverweightError::NotFound,
 		);

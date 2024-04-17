@@ -28,16 +28,14 @@ use polkadot_overseer::Handle;
 use polkadot_primitives::{Balance, CollatorPair, HeadData, Id as ParaId, ValidationCode};
 use polkadot_runtime_common::BlockHashCount;
 use polkadot_runtime_parachains::paras::{ParaGenesisArgs, ParaKind};
-use polkadot_service::{
-	ClientHandle, Error, ExecuteWithClient, FullClient, IsCollator, NewFull, PrometheusConfig,
-};
+use polkadot_service::{Error, FullClient, IsParachainNode, NewFull, PrometheusConfig};
 use polkadot_test_runtime::{
 	ParasCall, ParasSudoWrapperCall, Runtime, SignedExtra, SignedPayload, SudoCall,
 	UncheckedExtrinsic, VERSION,
 };
 
 use sc_chain_spec::ChainSpec;
-use sc_client_api::{execution_extensions::ExecutionStrategies, BlockchainEvents};
+use sc_client_api::BlockchainEvents;
 use sc_network::{
 	config::{NetworkConfiguration, TransportConfig},
 	multiaddr, NetworkStateInfo,
@@ -63,57 +61,48 @@ use std::{
 use substrate_test_client::{
 	BlockchainEventsExt, RpcHandlersExt, RpcTransactionError, RpcTransactionOutput,
 };
-/// Declare an instance of the native executor named `PolkadotTestExecutorDispatch`. Include the wasm binary as the
-/// equivalent wasm code.
-pub struct PolkadotTestExecutorDispatch;
-
-impl sc_executor::NativeExecutionDispatch for PolkadotTestExecutorDispatch {
-	type ExtendHostFunctions = frame_benchmarking::benchmarking::HostFunctions;
-
-	fn dispatch(method: &str, data: &[u8]) -> Option<Vec<u8>> {
-		polkadot_test_runtime::api::dispatch(method, data)
-	}
-
-	fn native_version() -> sc_executor::NativeVersion {
-		polkadot_test_runtime::native_version()
-	}
-}
 
 /// The client type being used by the test service.
-pub type Client = FullClient<polkadot_test_runtime::RuntimeApi, PolkadotTestExecutorDispatch>;
+pub type Client = FullClient;
 
-pub use polkadot_service::FullBackend;
+pub use polkadot_service::{FullBackend, GetLastTimestamp};
 
 /// Create a new full node.
 #[sc_tracing::logging::prefix_logs_with(config.network.node_name.as_str())]
 pub fn new_full(
 	config: Configuration,
-	is_collator: IsCollator,
-	worker_program_path: Option<PathBuf>,
-) -> Result<NewFull<Arc<Client>>, Error> {
-	polkadot_service::new_full::<polkadot_test_runtime::RuntimeApi, PolkadotTestExecutorDispatch, _>(
+	is_parachain_node: IsParachainNode,
+	workers_path: Option<PathBuf>,
+) -> Result<NewFull, Error> {
+	let workers_path = Some(workers_path.unwrap_or_else(get_relative_workers_path_for_test));
+
+	polkadot_service::new_full(
 		config,
-		is_collator,
-		None,
-		true,
-		None,
-		None,
-		worker_program_path,
-		false,
-		polkadot_service::RealOverseerGen,
-		None,
-		None,
-		None,
+		polkadot_service::NewFullParams {
+			is_parachain_node,
+			grandpa_pause: None,
+			enable_beefy: true,
+			jaeger_agent: None,
+			telemetry_worker_handle: None,
+			node_version: None,
+			workers_path,
+			workers_names: None,
+			overseer_gen: polkadot_service::RealOverseerGen,
+			overseer_message_channel_capacity_override: None,
+			malus_finality_delay: None,
+			hwbench: None,
+		},
 	)
 }
 
-/// A wrapper for the test client that implements `ClientHandle`.
-pub struct TestClient(pub Arc<Client>);
-
-impl ClientHandle for TestClient {
-	fn execute_with<T: ExecuteWithClient>(&self, t: T) -> T::Output {
-		T::execute_with_client::<_, _, polkadot_service::FullBackend>(t, self.0.clone())
-	}
+fn get_relative_workers_path_for_test() -> PathBuf {
+	// If no explicit worker path is passed in, we need to specify it ourselves as test binaries
+	// are in the "deps/" directory, one level below where the worker binaries are generated.
+	let mut exe_path = std::env::current_exe()
+		.expect("for test purposes it's reasonable to expect that this will not fail");
+	let _ = exe_path.pop();
+	let _ = exe_path.pop();
+	exe_path
 }
 
 /// Returns a prometheus config usable for testing.
@@ -183,14 +172,6 @@ pub fn node_config(
 			instantiation_strategy: WasmtimeInstantiationStrategy::PoolingCopyOnWrite,
 		},
 		wasm_runtime_overrides: Default::default(),
-		// NOTE: we enforce the use of the native runtime to make the errors more debuggable
-		execution_strategies: ExecutionStrategies {
-			syncing: sc_client_api::ExecutionStrategy::NativeWhenPossible,
-			importing: sc_client_api::ExecutionStrategy::NativeWhenPossible,
-			block_construction: sc_client_api::ExecutionStrategy::NativeWhenPossible,
-			offchain_worker: sc_client_api::ExecutionStrategy::NativeWhenPossible,
-			other: sc_client_api::ExecutionStrategy::NativeWhenPossible,
-		},
 		rpc_addr: Default::default(),
 		rpc_max_request_size: Default::default(),
 		rpc_max_response_size: Default::default(),
@@ -225,11 +206,11 @@ pub fn run_validator_node(
 ) -> PolkadotTestNode {
 	let multiaddr = config.network.listen_addresses[0].clone();
 	let NewFull { task_manager, client, network, rpc_handlers, overseer_handle, .. } =
-		new_full(config, IsCollator::No, worker_program_path)
+		new_full(config, IsParachainNode::No, worker_program_path)
 			.expect("could not create Polkadot test service");
 
 	let overseer_handle = overseer_handle.expect("test node must have an overseer handle");
-	let peer_id = network.local_peer_id().clone();
+	let peer_id = network.local_peer_id();
 	let addr = MultiaddrWithPeerId { multiaddr, peer_id };
 
 	PolkadotTestNode { task_manager, client, overseer_handle, addr, rpc_handlers }
@@ -257,11 +238,11 @@ pub fn run_collator_node(
 	let config = node_config(storage_update_func, tokio_handle, key, boot_nodes, false);
 	let multiaddr = config.network.listen_addresses[0].clone();
 	let NewFull { task_manager, client, network, rpc_handlers, overseer_handle, .. } =
-		new_full(config, IsCollator::Yes(collator_pair), None)
+		new_full(config, IsParachainNode::Collator(collator_pair), None)
 			.expect("could not create Polkadot test service");
 
 	let overseer_handle = overseer_handle.expect("test node must have an overseer handle");
-	let peer_id = network.local_peer_id().clone();
+	let peer_id = network.local_peer_id();
 	let addr = MultiaddrWithPeerId { multiaddr, peer_id };
 
 	PolkadotTestNode { task_manager, client, overseer_handle, addr, rpc_handlers }
@@ -275,7 +256,8 @@ pub struct PolkadotTestNode {
 	pub client: Arc<Client>,
 	/// A handle to Overseer.
 	pub overseer_handle: Handle,
-	/// The `MultiaddrWithPeerId` to this node. This is useful if you want to pass it as "boot node" to other nodes.
+	/// The `MultiaddrWithPeerId` to this node. This is useful if you want to pass it as "boot
+	/// node" to other nodes.
 	pub addr: MultiaddrWithPeerId,
 	/// `RPCHandlers` to make RPC queries.
 	pub rpc_handlers: RpcHandlers,
@@ -291,7 +273,7 @@ impl PolkadotTestNode {
 	) -> Result<(), RpcTransactionError> {
 		let sudo = SudoCall::sudo { call: Box::new(call.into()) };
 
-		let extrinsic = construct_extrinsic(&*self.client, sudo, caller, nonce);
+		let extrinsic = construct_extrinsic(&self.client, sudo, caller, nonce);
 		self.rpc_handlers.send_transaction(extrinsic.into()).await.map(drop)
 	}
 
@@ -301,7 +283,7 @@ impl PolkadotTestNode {
 		function: impl Into<polkadot_test_runtime::RuntimeCall>,
 		caller: Sr25519Keyring,
 	) -> Result<RpcTransactionOutput, RpcTransactionError> {
-		let extrinsic = construct_extrinsic(&*self.client, function, caller, 0);
+		let extrinsic = construct_extrinsic(&self.client, function, caller, 0);
 
 		self.rpc_handlers.send_transaction(extrinsic.into()).await
 	}
@@ -330,14 +312,15 @@ impl PolkadotTestNode {
 		self.send_sudo(call, Sr25519Keyring::Alice, 1).await
 	}
 
-	/// Wait for `count` blocks to be imported in the node and then exit. This function will not return if no blocks
-	/// are ever created, thus you should restrict the maximum amount of time of the test execution.
+	/// Wait for `count` blocks to be imported in the node and then exit. This function will not
+	/// return if no blocks are ever created, thus you should restrict the maximum amount of time of
+	/// the test execution.
 	pub fn wait_for_blocks(&self, count: usize) -> impl Future<Output = ()> {
 		self.client.wait_for_blocks(count)
 	}
 
-	/// Wait for `count` blocks to be finalized and then exit. Similarly with `wait_for_blocks` this function will
-	/// not return if no block are ever finalized.
+	/// Wait for `count` blocks to be finalized and then exit. Similarly with `wait_for_blocks` this
+	/// function will not return if no block are ever finalized.
 	pub async fn wait_for_finalized_blocks(&self, count: usize) {
 		let mut import_notification_stream = self.client.finality_notification_stream();
 		let mut blocks = HashSet::new();
@@ -357,7 +340,8 @@ impl PolkadotTestNode {
 		para_id: ParaId,
 		collator: CollatorFn,
 	) {
-		let config = CollationGenerationConfig { key: collator_key, collator, para_id };
+		let config =
+			CollationGenerationConfig { key: collator_key, collator: Some(collator), para_id };
 
 		self.overseer_handle
 			.send_msg(CollationGenerationMessage::Initialize(config), "Collator")
